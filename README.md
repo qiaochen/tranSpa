@@ -4,9 +4,10 @@ This tool implements Spatially-Regularized Translation for imputing spatial tran
 
 ## Installation
 Under project root `tranSpa/`
-'''
+
+```
 pip install .
-'''
+```
 
 
 
