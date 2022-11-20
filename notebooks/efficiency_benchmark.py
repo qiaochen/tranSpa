@@ -24,11 +24,11 @@ device = torch.device(
 
 def load_AllenVISp():
     VISp_adata = sc.read(
-        "../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_exon-matrix.csv").T
+        "../../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_exon-matrix.csv").T
     genes = pd.read_csv(
-        "../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_genes-rows.csv", header=0, sep=',')
+        "../../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_genes-rows.csv", header=0, sep=',')
     VISp_meta = pd.read_csv(
-        "../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_samples-columns.csv", header=0, sep=',')
+        "../../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_samples-columns.csv", header=0, sep=',')
 
     VISp_adata.obs = VISp_meta
     VISp_adata.var_names = genes.gene_symbol
