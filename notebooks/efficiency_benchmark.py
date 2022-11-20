@@ -1,7 +1,7 @@
 from scipy import sparse
-from benchmark import Tangram_impute, SpaGE_impute, stPlus_impute
-from transpa.util import expTransImp, leiden_cluster, compute_autocorr
-from transpa.eval_util import calc_corr, CalculateMeteics, mse_moranI, mse_gearyC
+from benchmark import Tangram_impute, SpaGE_impute
+from transpa.util import expTransImp, leiden_cluster
+
 import stPlus
 
 from locale import normalize
@@ -24,11 +24,11 @@ device = torch.device(
 
 def load_AllenVISp():
     VISp_adata = sc.read(
-        "/data/users/cqiao/data/stPlus/data/SpaGE Datasets/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_exon-matrix.csv").T
+        "../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_exon-matrix.csv").T
     genes = pd.read_csv(
-        "/data/users/cqiao/data/stPlus/data/SpaGE Datasets/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_genes-rows.csv", header=0, sep=',')
+        "../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_genes-rows.csv", header=0, sep=',')
     VISp_meta = pd.read_csv(
-        "/data/users/cqiao/data/stPlus/data/SpaGE Datasets/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_samples-columns.csv", header=0, sep=',')
+        "../data/scRNAseq/Allen_VISp/mouse_VISp_2018-06-14_samples-columns.csv", header=0, sep=',')
 
     VISp_adata.obs = VISp_meta
     VISp_adata.var_names = genes.gene_symbol
@@ -56,38 +56,6 @@ def load_osmFISH():
     osmFISH.obsm['spatial'] = np.hstack([osmFISH.obs.X.values.reshape(-1,1), osmFISH.obs.Y.values.reshape(-1,1)])
     sq.gr.spatial_neighbors(osmFISH)
     return osmFISH, raw_spatial_df
-
-
-def load_AllenSSp():
-    ssp_adata = sc.read(
-        "/data/users/cqiao/data/stPlus/data/SpaGE Datasets/scRNAseq/Allen_SSp/SSp_exons_matrix.csv").T
-    ssp_meta = pd.read_csv(
-        "/data/users/cqiao/data/stPlus/data/SpaGE Datasets/scRNAseq/Allen_SSp/AllenSSp_metadata.csv", header=0, sep=',')
-    ssp_adata.obs = ssp_meta
-    sc.pp.filter_genes(ssp_adata, min_cells=10)
-    ssp_adata = ssp_adata[ssp_adata.obs.class_label != 'Exclude']
-
-    classes, ct_list = leiden_cluster(ssp_adata)
-    cls_key = 'leiden'
-    ssp_adata.obs[cls_key] = classes
-    sc.pp.normalize_total(ssp_adata)
-    sc.pp.log1p(ssp_adata)
-    raw_scrna_df = pd.DataFrame(ssp_adata.X, columns=ssp_adata.var_names)#.astype(
-        # pd.SparseDtype("float32", 0))
-    return ssp_adata, raw_scrna_df
-
-
-def load_zeisel():
-    scrna_df_file = '/data/users/cqiao/data/stPlus/data/Zeisel_df.csv'
-    raw_scrna_df = pd.read_csv(scrna_df_file)   # already been log1p
-    adata_scrna = sc.AnnData(raw_scrna_df.values, dtype=np.float32)
-    adata_scrna.var_names = raw_scrna_df.columns
-    classes, ct_list = leiden_cluster(adata_scrna)
-    cls_key = 'leiden'
-    adata_scrna.obs[cls_key] = classes
-    sc.pp.normalize_total(adata_scrna)
-    sc.pp.log1p(adata_scrna)
-    return adata_scrna, raw_scrna_df
 
 
 def load_starmap():
@@ -167,18 +135,6 @@ def load_moffit():
 
 def dataset_osmFISH_AllenVISp():
     rna_adata, rna_df = load_AllenVISp()
-    spa_adata, spa_df = load_osmFISH()
-    raw_shared_gene = np.intersect1d(spa_df.columns, rna_df.columns)
-    return spa_adata, rna_adata, spa_df, rna_df, raw_shared_gene
-
-def dataset_osmFISH_AllenSSp():
-    rna_adata, rna_df = load_AllenSSp()
-    spa_adata, spa_df = load_osmFISH()
-    raw_shared_gene = np.intersect1d(spa_df.columns, rna_df.columns)
-    return spa_adata, rna_adata, spa_df, rna_df, raw_shared_gene
-
-def dataset_osmFISH_zeisel():
-    rna_adata, rna_df = load_zeisel()
     spa_adata, spa_df = load_osmFISH()
     raw_shared_gene = np.intersect1d(spa_df.columns, rna_df.columns)
     return spa_adata, rna_adata, spa_df, rna_df, raw_shared_gene
@@ -368,8 +324,6 @@ def method_stPlus(spa_adata, rna_adata, spa_df, rna_df, raw_shared_gene, seed=No
 
 
 dict_datasets = dict(osmFISH_AllenVISp=dataset_osmFISH_AllenVISp, 
-        osmFISH_AllenSSp=dataset_osmFISH_AllenSSp,
-        osmFISH_zeisel=dataset_osmFISH_zeisel,
         starmap_AllenVISp=dataset_starmap_AllenVISp,
         merfish_moffit=dataset_merfish_moffit,
         seqFISH_SingleCell=dataset_seqfish_singlecell,
