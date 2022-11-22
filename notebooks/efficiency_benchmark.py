@@ -46,8 +46,8 @@ def load_AllenVISp():
 
 
 def load_osmFISH():
-    spatial_df_file = '/data/users/cqiao/data/stPlus/data/osmFISH_df.csv'
-    spatial_loom_file = '/data/users/cqiao/data/stPlus/data/osmFISH_SScortex_mouse_all_cells.loom'
+    spatial_df_file = '../../data/ST/osmFISH/osmFISH_df.csv'
+    spatial_loom_file = '../../data/ST/osmFISH/osmFISH_SScortex_mouse_all_cells.loom'
     osmFISH = sc.read_loom(spatial_loom_file)
     osmFISH = osmFISH[~np.isin(osmFISH.obs.Region, [
                                'Excluded', 'Hippocampus', 'Internal Capsule Caudoputamen', 'Ventricle', 'White matter'])]
@@ -59,12 +59,9 @@ def load_osmFISH():
 
 
 def load_starmap():
-    spa_counts = np.load(
-        '/data/users/cqiao/data/stPlus/data/SpaGE Datasets/Spatial/Starmap/visual_1020/20180505_BY3_1kgenes/cell_barcode_count.npy')
-    genes = pd.read_csv(
-        "/data/users/cqiao/data/stPlus/data/SpaGE Datasets/Spatial/Starmap/visual_1020/20180505_BY3_1kgenes/genes.csv", header=None).iloc[:, 0]
-    coordinates = pd.read_csv(
-        "/data/users/cqiao/data/stPlus/data/SpaGE Datasets/Spatial/Starmap/visual_1020/20180505_BY3_1kgenes/centroids.tsv", header=None, sep='\t')
+    spa_counts = np.load('../../data/ST/Starmap/visual_1020/20180505_BY3_1kgenes/cell_barcode_count.npy')
+    genes = pd.read_csv("../../data/ST/Starmap/visual_1020/20180505_BY3_1kgenes/genes.csv", header=None).iloc[:,0]
+    coordinates = pd.read_csv("../../data/ST/Starmap/visual_1020/20180505_BY3_1kgenes/centroids.tsv", header=None, sep='\t')
 
     spa_adata = sc.AnnData(spa_counts)
     sc.pp.normalize_total(spa_adata)
@@ -79,8 +76,7 @@ def load_starmap():
 
 
 def load_seqfish():
-    spa_adata = sc.read_h5ad(
-        "/data/users/cqiao/notebooks/projects/spatial/seqfishdata/seqfish_data.h5ad")
+    spa_adata = sc.read_h5ad("../../data/ST/seqfish/seqfish_data.h5ad")
     sc.pp.normalize_total(spa_adata)
     sc.pp.log1p(spa_adata)
     raw_spatial_df = pd.DataFrame(
@@ -92,8 +88,7 @@ def load_seqfish():
 
 
 def load_seqFISHsinglecell():
-    scrna_adata = sc.read_h5ad(
-        "/data/users/cqiao/notebooks/projects/spatial/seqfishdata/scRNAseq_seqfish.h5ad")
+    scrna_adata = sc.read_h5ad("../../data/scRNAseq/seqfish/scRNAseq_seqfish.h5ad")
     classes, ct_list = leiden_cluster(scrna_adata)
     cls_key = 'leiden'
     sc.pp.normalize_total(scrna_adata)
@@ -108,7 +103,7 @@ def load_seqFISHsinglecell():
 
 
 def load_merfish():
-    merfish_path = '../data/merfish.h5ad'
+    merfish_path = '../../data/ST/Merfish/merfish.h5ad'
     if os.path.exists(merfish_path):
         spa_adata = sc.read(merfish_path)
     spa_adata.var_names_make_unique()
@@ -119,7 +114,7 @@ def load_merfish():
 
 
 def load_moffit():
-    Moffit_path = '../data/moffit_adata.h5ad'
+    Moffit_path = '../../data/scRNAseq/Moffit/moffit_adata.h5ad'
 
     if os.path.exists(Moffit_path):
         Moffit_adata = sc.read(Moffit_path)
