@@ -12,7 +12,7 @@ from chi2comb import chi2comb_cdf, ChiSquared
 
 from tqdm import tqdm
 
-from .model import LocSpaAutoCorr, TransDeconv, TransImpute, TransImp, LocSpaAutoCorr, SpaAutoCorr, SparkX, SpaReg
+from .model import TransDeconv, TransImpute, TransImp, SpaAutoCorr, SparkX, SpaReg
 from .eval_util import spark_stat
 
 
