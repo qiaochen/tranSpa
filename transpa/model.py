@@ -448,81 +448,6 @@ class SpaAutoCorr(SpaStats):
         return self.mse(pred_stats, self.truth_stats)
 
 
-class LocSpaAutoCorr(SpaStats):
-
-    def __init__(self,
-                 Y,
-                 spa_adj: torch.sparse_coo_tensor,
-                 truth_stats: torch.Tensor=None,
-                 method: str=CANO_NAME_MORANSI,
-        ):
-        super().__init__()
-        self.spa_adj = spa_adj
-        self.truth_stats = truth_stats
-        self.adjmat_degrees = torch.sparse.sum(spa_adj, dim=1).to_dense()
-        if not method in {CANO_NAME_MORANSI, CANO_NAME_GEARYSC}:
-            raise Exception("Unimplemented autocorrelation method!")
-        self.method = method
-        # self.mse = nn.MSELoss()
-        self.mse = nn.SmoothL1Loss()
-        with torch.no_grad():
-            self.truth_stats = self.cal_spa_stats(Y)
-        
-    def _moransI_numerator_sparse_adj(self, centered_expr, sparse_adj):
-        numerator = centered_expr * torch.sparse.mm(sparse_adj, centered_expr.t()).t()
-        return numerator
-
-    def _gearysI_numerator_sparse_adj(self, gene_expr, sparse_adj):
-        # I use a trick from Laplacian Eigenmaps for computing the numerator
-        # \sum_{i,j} w_ij ||z_i - z_j||^2 = 2 * Trace(Z(D - W)Z^T)
-        # To test:
-        # from scipy import sparse
-        # _W = np.abs(np.random.randn(4, 4))
-        # W = _W @ _W.T
-        # W -= np.diag(W.diagonal())
-        # Y = np.random.randn(4, 1)
-        # D = W.sum(axis=1)
-        # np.sum((Y - Y.T)**2 * W), 2 * np.sum(D * Y.flatten() ** 2) - 2 * Y.T @ W @ Y
-        degrees = self.adjmat_degrees
-        # Trace(ZDZ^T), since z_i is 1-d vector, we can simplify the computation as follows
-        traceZDZ_T = (degrees.view(1,-1) * torch.square(gene_expr)).sum(dim=1)
-        # Trace(ZWZ^T), since z_i is 1-d vector, we can simplify the computation as follows
-        traceZWZ_T = torch.sum(gene_expr * torch.sparse.mm(sparse_adj, gene_expr.t()).t(), dim=1)
-        numerator = 2 * (traceZDZ_T - traceZWZ_T)
-        return numerator    
-
-    def cal_spa_stats(self, gene_expr):
-        method = self.method
-        gene_expr = gene_expr.t()
-        sparse_adj = self.spa_adj
-        W = torch.sum(sparse_adj._values())
-        N = gene_expr.shape[1]
-        centered_expr = gene_expr - torch.mean(gene_expr, dim=1, keepdim=True)
-        denominator = torch.sum(torch.square(centered_expr), dim=1)
-        
-        if (denominator == 0).any():
-            mask = torch.zeros_like(denominator)
-            mask[denominator == 0] = 1e-6
-            denominator = denominator + mask
-
-        if method == CANO_NAME_MORANSI:
-            numerator_I = self._moransI_numerator_sparse_adj(centered_expr, sparse_adj)
-            # print(numerator_I.shape, denominator.shape)
-            return N * numerator_I / denominator.view(-1, 1)
-
-        if method == CANO_NAME_GEARYSC:
-            numerator_C = self._gearysI_numerator_sparse_adj(gene_expr, sparse_adj)
-            return (N - 1)/ (2*W) * numerator_C / denominator
-        return None  
-
-    def loss(self, Y_hat):
-        pred_stats = self.cal_spa_stats(Y_hat)
-        # with no_grad
-        # self.cal_spa_stats(Y_hat[np.random.permutation(Y_hat.shape[0])].detach())
-        return self.mse(pred_stats, self.truth_stats)
-
-    
-
 class TransDeconv(nn.Module):
     """Translation-based cell type deconvolution     
     """
@@ -541,7 +466,7 @@ class TransDeconv(nn.Module):
             dim_tgt_outputs (int): Dimension of ground truth gene profile
             dim_ref_inputs (int): Dimension of reference gene signature
             n_feats (int): number of genes
-            spa_lap (torch.sparse_coo_tensor, optional): The laplacian matrix for smoothing. Defaults to None.
+            spa_autocorr (SpaAutoCorr, optional): Instance of Spatial index class. Default to None.
             device (torch.device, optional): Device of computation. Defaults to None.
             seed (int, optional): Seed number. Defaults to None.
         """
@@ -602,7 +527,14 @@ class TransDeconv(nn.Module):
         Args:
             X (Tensor): Reference gene signature matrix [Cell, Gene]
             Y (Tensor): Ground truth gene profile matrix [Spot, gene]
-            cls_abd_sig (Tensor): Class abundance signateure
+            cls_abd_sig (Tensor): Class abundance signature.
+            truth_autocorr (Tensor): Ground-Truth spatal autocorrelation indices. Defaults to None.
+            wt_l2_G (float): Weight of l2 regularization. Defaults to 2.0.
+            wt_l2_S (float): Weight of l2 regularization. Defaults to 2.0.
+            wt_l1 (float): weight of l1 regulariztion. Defaults to 5.0.
+            wt_abd (float): weight of abundance signature loss. Defaults to 2.0.
+            wt_spa (float): weight spatial regularization loss. Defaults to 1.0.
+            method_autocorr (str): name of spatial autocorrelation methods "moranI" or "gearyC"
 
         Returns:
             Tensor: scalar loss
@@ -672,6 +604,7 @@ class RaTranslator(nn.Module):
         Args:
             dim_input (float): dimension of reference gene profile
             dim_output (float): dimension of target gene profile
+            dim_hid  (int): dimension of hidden layer. Defaults to 512.
             seed (int, optional): random seed. Defaults to None.
             device (torch.device, optional): device of computation. Defaults to None.
         """
@@ -724,9 +657,9 @@ class RaTranslatorLowRank(nn.Module):
     """
 
     def __init__(self,
-                 dim_input: float,
-                 dim_output: float,
-                 dim_hid: float=512,
+                 dim_input: int,
+                 dim_output: int,
+                 dim_hid: int=512,
                  clip_max: float=10,
                  seed: int=None,
                  device: torch.device=None
@@ -734,8 +667,10 @@ class RaTranslatorLowRank(nn.Module):
         """
 
         Args:
-            dim_input (float): dimension of reference gene profile
-            dim_output (float): dimension of target gene profile
+            dim_input (int): dimension of reference gene profile
+            dim_output (int): dimension of target gene profile
+            dim_hid  (int): dimension of hidden layer. Defaults to 512.
+            clip_max (float): clipping threshold for output of first translation. Defaults to 10.
             seed (int, optional): random seed. Defaults to None.
             device (torch.device, optional): device of computation. Defaults to None.
         """
@@ -798,6 +733,7 @@ class RaTranslatorNoneLinear(nn.Module):
         Args:
             dim_input (float): dimension of reference gene profile
             dim_output (float): dimension of target gene profile
+            dim_hid  (int): dimension of hidden layer. Defaults to 521.
             seed (int, optional): random seed. Defaults to None.
             device (torch.device, optional): device of computation. Defaults to None.
         """
@@ -859,8 +795,10 @@ class TransImp(nn.Module):
         Args:
             dim_tgt_outputs (int): Dimension of ground truth gene profile
             dim_ref_inputs (int): Dimension of reference gene signature
-            n_feats (int): number of genes
-            spa_lap (torch.sparse_coo_tensor, optional): The laplacian matrix for smoothing. Defaults to None.
+            dim_hid  (int): dimension of hidden layer. Defaults to 521.
+            clip_max (float): clipping threshold for output of first translation. Defaults to 10.
+            spa_inst (SpaAutoCorr, optional): Instance of Spatial index class. Default to None.
+            mapping_mode (str): "lowrank" or "full". Defaults to full.
             device (torch.device, optional): Device of computation. Defaults to None.
             seed (int, optional): Seed number. Defaults to None.
         """
@@ -934,7 +872,10 @@ class TransImp(nn.Module):
         Args:
             X (Tensor): Reference gene signature matrix [Cell, Gene]
             Y (Tensor): Ground truth gene profile matrix [Spot, gene]
-            cls_abd_sig (Tensor): Class abundance signateure
+            wt_l1norm (float): l1 normalization for translation function. Default to 1e-2. 
+            wt_l2norm (float): l2 normalization for translation function. Default to 1e-2.
+            wt_spa (float): weight for spatial regularization loss. Default to 1e-1.
+            truth_spa_stats (Tensor): Ground-Truth spatial statistics. Defaults to None.
 
         Returns:
             Tensor: scalar loss
