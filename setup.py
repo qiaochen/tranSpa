@@ -22,5 +22,6 @@ setup(name='transpa',
         'scanpy>=1.5.1',
         'torch>=1.7',
         'scikit-learn',
+        'squidpy',
       ]
     )

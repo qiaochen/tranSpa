@@ -8,11 +8,10 @@ import squidpy as sq
 from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import rbf_kernel
-from chi2comb import chi2comb_cdf, ChiSquared
 
 from tqdm import tqdm
 
-from .model import TransDeconv, TransImpute, TransImp, SpaAutoCorr, SparkX, SpaReg
+from .model import TransDeconv, TransImp, SpaAutoCorr, SparkX, SpaReg
 from .eval_util import spark_stat
 
 
@@ -64,56 +63,6 @@ def select_top_variable_genes(data_mtx, top_k):
     ind = np.argpartition(var,-top_k)[-top_k:]
     return ind
 
-def decompose_raw_gene_mtx(data_mtx, low_dim):
-    scrna_pca = TruncatedSVD(n_components=low_dim)
-    scrna_g_rep = scrna_pca.fit_transform(data_mtx.T).T
-    return scrna_g_rep, scrna_pca.explained_variance_ratio_
-
-
-def prepare_ref_gene_rep(expr_mat, low_dim=2000, preserved_gene_ids=[], n_genes=None):
-    ind = np.array(preserved_gene_ids) # range(expr_mat.shape[1])
-    if not n_genes is None and n_genes > 0:
-        ind = select_top_variable_genes(expr_mat, n_genes)
-        ind = np.union1d(preserved_gene_ids, ind)
-    if not low_dim is None:
-        rep, weights = decompose_raw_gene_mtx(expr_mat[:, ind], low_dim)
-    else:
-        rep, weights = expr_mat[:, ind] if not sparse.issparse(expr_mat) else expr_mat.toarray()[:, ind], 0
-    return rep, weights, ind
-
-
-def auto_RG_dim(n_genes):
-    if n_genes > 512:
-        return int(np.sqrt(n_genes)) + 1
-    elif n_genes > 128:
-    # return max(int(np.sqrt(n_genes)) * 2, 16) 
-        return int(np.power(n_genes, 0.6)) + 1
-    elif n_genes > 32:
-        return int(np.power(n_genes, 0.7)) + 1
-    else:
-        return int(np.power(n_genes, 0.8)) + 1
-
-def prepare_data_lite(df_ref, df_tgt, train_genes, test_genes, pca_low_dim):
-    full_ref_df = df_ref[np.concatenate([train_genes, test_genes])]
-    expr_mat = full_ref_df.sparse.to_coo().tocsc() if pd.api.types.is_sparse(full_ref_df) else full_ref_df.values
-    X, _ = decompose_raw_gene_mtx(expr_mat, pca_low_dim)
-    tgt_Y = df_tgt[train_genes].values
-    return X, tgt_Y
-
-def prepare_data(df_ref, df_tgt, train_genes, test_genes, pca_low_dim, n_genes):
-    shared_genes = np.intersect1d(df_ref.columns, df_tgt.columns)
-    preserved_genes = np.union1d(shared_genes, test_genes)
-    preserved_gene_ids = [df_ref.columns.get_loc(name) for name in preserved_genes]
-    ref_X, _, sel_ids = prepare_ref_gene_rep(
-                                   df_ref.sparse.to_coo().tocsc() if pd.api.types.is_sparse(df_ref) else df_ref.values, 
-                                   low_dim=pca_low_dim,
-                                   preserved_gene_ids=preserved_gene_ids, 
-                                   n_genes=n_genes)
-
-    bridge_gene_ids = [np.argwhere(sel_ids == df_ref.columns.get_loc(g)).flatten()[0]  for g in np.setdiff1d(shared_genes, test_genes)]
-    test_gene_ids = [np.argwhere(sel_ids == df_ref.columns.get_loc(g)).flatten()[0]  for g in test_genes]
-    tgt_Y = df_tgt[train_genes].values
-    return ref_X, tgt_Y, bridge_gene_ids, test_gene_ids, sel_ids
 
 def tensify(X, device=None, is_dense=True):
     # X is dense or a sparse matrix
@@ -125,61 +74,6 @@ def tensify(X, device=None, is_dense=True):
                                 indices=np.array([X.row, X.col]),
                                 values=X.data,
                                 size=X.shape).float().to(device)
-
-
-def train_nntrans_step(optimizer, model, X, Y, reg_dims, 
-                      ae_wt, kld_wt=1.0):
-    model.train()
-    optimizer.zero_grad()
-    tt_loss, trans_loss, ae_loss, kld_loss = model.loss_vae_trans(X, Y, reg_dims, ae_wt, kld_wt)
-    tt_loss.backward()
-    optimizer.step()
-    info = f'loss: {tt_loss.item():.6f}, (Trans): {trans_loss.item():.6f}, (AE) {ae_loss.item():.6f}, (KLD) {kld_loss.item():.6f}'
-    return info
-
-
-def fit_base(df_ref, df_tgt, train_genes, 
-             test_genes,
-             ae_wt, kld_wt,
-             lr, weight_decay, n_epochs,
-             dim_hid_AE, 
-             dim_hid_RG,
-             pca_low_dim, 
-             n_top_genes,
-             device=None,
-             seed=None):
-    X, Y, reg_dims, test_dims, all_dims = prepare_data(
-                                            df_ref, df_tgt, train_genes, test_genes, 
-                                            pca_low_dim=pca_low_dim,
-                                            n_genes=n_top_genes
-                                        )
-    assert(X.shape[1] == len(all_dims))
-    
-    if dim_hid_RG is None:
-        dim_hid_RG = auto_RG_dim(Y.shape[1])  
-
-    if ae_wt is None:
-        n_shared_genes = (len(reg_dims) + len(test_dims)) 
-        n_spots = df_tgt.shape[0]
-        ae_wt = n_shared_genes * n_spots / (len(all_dims) - n_shared_genes) / X.shape[0]                                              
-    
-    X, Y = tensify(X, device), tensify(Y, device)
-
-    model = TransImpute(dim_tgt_outputs=Y.shape[0],
-                        dim_ref_inputs=X.shape[0],
-                        dim_hid_AE=dim_hid_AE,
-                        dim_hid_RG=dim_hid_RG,
-                        device=device,
-                        seed=seed).to(device)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)        
-    pbar = tqdm(range(n_epochs))
-
-    for ith_epoch in pbar:
-        info  = train_nntrans_step(optimizer, model, X, Y, reg_dims, 
-                                    ae_wt=ae_wt, kld_wt=kld_wt)
-        pbar.set_description(f"[TranSpa] Epoch: {ith_epoch+1}/{n_epochs}, {info}")
-    return model, X[:, test_dims]
 
 
 def signature(classes, ct_list, expr_mtx):
@@ -502,41 +396,3 @@ def expVeloImp(df_ref, df_tgt, S, U, V, train_gene, test_gene, classes=None, ct_
         _V = model.predict(tensify(V, device, not sparse.issparse(V)) + tensify(S, device, not sparse.issparse(U))) - _S
         X  = model.predict(test_X)
     return _S, _U, _V, X
-
-
-def sparkx_stat(loc, expr, STS_inv, return_pval=True, mean_expr=None):
-    # cell/spot by gene
-    N = expr.shape[0]
-    EHL = expr.t() @ loc 
-    numerator = torch.sum((EHL @ STS_inv) * EHL, dim=1)
-    denominator = torch.sum(torch.square(expr), dim=0)
-    test_stats = numerator * N / denominator
-    if not return_pval:
-        return test_stats
-    
-    S_eigvals = torch.linalg.eigvals(STS_inv @ loc.t() @ loc).real
-    
-    # np_S_eigvals = np.linalg.eigvals(loc.t().cpu().numpy() @ loc.cpu().numpy() @ STS_inv.cpu().numpy())
-    # print(S_eigvals, S_eigvals.real, (S_eigvals.imag != 0).sum(), S_eigvals.shape[0])
-    # print(np_S_eigvals)
-    expr_eigvals = 1 -  N * torch.square(mean_expr) / denominator
-    coefs = S_eigvals.view(1, -1) * expr_eigvals.view(-1, 1)
-    # coefs = (-np.sort(-coefs, axis=-1))[0]
-    coefs = torch.sort(coefs, dim=-1, descending=True)[0].cpu().numpy()
-    test_stats = test_stats.cpu().numpy()
-    pvals = [1-chi2comb_cdf(_stat, [ChiSquared(_coef, 0, 1) for _coef in _coefs], 0, atol=1e-8)[0] for _stat, _coefs in zip(test_stats, coefs)]
-    return test_stats, np.array(pvals)
-
-def sparkx_test(expr, loc, device=None):
-    expr = torch.FloatTensor(expr).to(device)
-    loc  = torch.FloatTensor(loc).to(device)
-    mean_expr = torch.mean(expr, dim=0, keepdim=True)
-    centered_expr = expr - mean_expr
-    centered_loc = loc - torch.mean(loc, dim=0, keepdim=True)
-    loc_inv = torch.linalg.solve(centered_loc.t() @ centered_loc, torch.eye(centered_loc.shape[1]).to(device))
-    stats, pvals = sparkx_stat(centered_loc, centered_expr, loc_inv,
-                                return_pval=True, mean_expr=mean_expr)
-    return stats, pvals
-
-
-
