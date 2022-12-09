@@ -14,6 +14,94 @@ CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
 
 
+class DualMapping(nn.Module):
+    """Linear dual mapping
+
+    Args:
+        nn (_type_): _description_
+
+    Raises:
+        Exception: _description_
+        Exception: _description_
+
+    Returns:
+        _type_: _description_
+    """
+    
+    def __init__(self, n_cells, 
+                       n_spots,
+                       dim_hid=100,
+                       device=None,
+                       seed=None,
+                       ) -> None:
+        super().__init__()
+        self.seed = seed
+        self.device = device
+        if not seed is None:
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+            
+        self.U = nn.Parameter(torch.randn(n_spots, dim_hid))
+        self.log_Sigma = nn.Parameter(torch.zeros(dim_hid, 1))
+        self.V = nn.Parameter(torch.randn(n_cells, dim_hid))
+        self.V_prime = nn.Parameter(torch.randn(n_cells, dim_hid))
+        self.dim_hid = dim_hid
+        self.criterion = nn.MSELoss()
+        
+    def cell2spot(self, X):
+        """Transform
+
+        Args:
+            X (Tensor): Cell by Gene Matrix
+
+        Raises:
+            Exception: _description_
+            Exception: _description_
+
+        Returns:
+            _type_: _description_
+        """
+        return self.U @ (torch.exp(self.log_Sigma) * self.V.t()) @ X
+    
+    def spot2cell(self, Y):
+        """Transform from spots to cells
+
+        Args:
+            Y (_type_): _description_
+
+        Raises:
+            Exception: _description_
+            Exception: _description_
+
+        Returns:
+            _type_: _description_
+        """
+        return self.V_prime @ ( self.U.t() / torch.exp(self.log_Sigma)) @ Y
+    
+    def cell2spot_consts(self):
+        """_summary_
+        """
+        eye = torch.eye(self.dim_hid, device=self.device)
+        v_consts = self.criterion(self.V.t() @ self.V, eye)
+        u_consts = self.criterion(self.U.t() @ self.U, eye)
+        return v_consts, u_consts
+                        
+    def spot2cell_connts(self):
+        """_summary_
+        """
+        rotate_consts = self.V_prime @ self.V.t(), torch.eye(self.V_prime.shape[0], device=self.device)
+        v_prime_consts = (self.V_prime.t() @ self.V_prime, torch.eye(self.dim_hid, device=self.device))
+        return rotate_consts, v_prime_consts
+    
+    def forward(self, input, is_cell2spot=True):
+        if is_cell2spot:
+            return self.cell2spot(input)
+        else:
+            return self.spot2cell(input)
+        
+
+
 class LinTranslator(nn.Module):
     """Linear translator
     """
