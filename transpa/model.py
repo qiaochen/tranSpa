@@ -8,7 +8,7 @@ import numpy as np
 from turtle import forward
 from torch import Tensor, nn
 from typing import List, Tuple
-from torch import nn
+
 
 CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
@@ -64,11 +64,11 @@ class DualMapping(nn.Module):
         """
         return self.U @ (torch.exp(self.log_Sigma) * self.V.t()) @ X
     
-    def spot2cell(self, Y):
+    def spot2cell(self, Y, fix_u_s=True):
         """Transform from spots to cells
 
         Args:
-            Y (_type_): _description_
+            Y (Tensor): Spot by Gene Matrix
 
         Raises:
             Exception: _description_
@@ -77,7 +77,12 @@ class DualMapping(nn.Module):
         Returns:
             _type_: _description_
         """
-        return self.V_prime @ ( self.U.t() / torch.exp(self.log_Sigma)) @ Y
+        if fix_u_s:
+            with torch.no_grad():
+                UT_Sigma = (self.U.t() / torch.exp(self.log_Sigma)).detach()
+        else:
+            UT_Sigma = (self.U.t() / torch.exp(self.log_Sigma))
+        return self.V_prime @ UT_Sigma @ Y
     
     def cell2spot_consts(self):
         """_summary_
@@ -94,11 +99,151 @@ class DualMapping(nn.Module):
         v_prime_consts = (self.V_prime.t() @ self.V_prime, torch.eye(self.dim_hid, device=self.device))
         return rotate_consts, v_prime_consts
     
-    def forward(self, input, is_cell2spot=True):
+    def forward(self, input, is_cell2spot=True, fix_u_s=True):
         if is_cell2spot:
             return self.cell2spot(input)
         else:
-            return self.spot2cell(input)
+            return self.spot2cell(input, fix_u_s)
+
+
+class DualMapping(nn.Module):
+    """Dual Translation-based spatial gene imputation     
+    """
+
+    def __init__(self,
+                 n_spots: int,
+                 n_cells:  int,
+                 dim_hid: int=512,
+                 clip_max: float=10,
+                 spa_inst=None,
+                 device:    torch.device=None,
+                 seed:       int=None
+                ):
+        """_summary_
+
+        Args:
+            n_spots (int): _description_
+            n_cells (int): _description_
+            dim_hid (int, optional): _description_. Defaults to 512.
+            clip_max (float, optional): _description_. Defaults to 10.
+            spa_inst (_type_, optional): _description_. Defaults to None.
+            mapping_mode (str, optional): _description_. Defaults to 'full'.
+            device (torch.device, optional): _description_. Defaults to None.
+            seed (int, optional): _description_. Defaults to None.
+
+        Raises:
+            Exception: _description_
+        """
+        super().__init__()
+        self.device = device
+        self.seed = seed
+        if not seed is None:
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+        
+        self.cos_by_col = nn.CosineSimilarity(dim=1)
+        self.cos_by_row = nn.CosineSimilarity(dim=0)
+        self.mse = nn.MSELoss(reduction='mean')
+        self.trans = DualMapping(n_spots=n_spots, 
+                                       n_cells=n_cells, 
+                                       dim_hid=dim_hid, 
+                                       device=device, 
+                                       seed=seed)
+        self.spa_inst = spa_inst
+   
+    def predict(self, X: Tensor) -> np.ndarray:
+        """Do translation
+
+        Args:
+            X (Tensor): Reference gene signature
+            return_cluster (bool, optional): Whether or not to return tranlation matrix. Defaults to False.
+
+        Returns:
+            np.ndarray: Translation result
+        """
+        self.eval()
+        with torch.no_grad():
+            preds = self(X)
+            preds = preds / max(torch.std(preds).item(), 1e-6)
+        return preds.cpu().numpy()
+
+    def _corr_loss(self, truth, pred):
+        norm_pred = torch.norm(pred, dim=1)
+        sel_valid = (norm_pred != 0) & ~torch.isnan(norm_pred) &  ~torch.isinf(norm_pred)
+        loss1 = (1 - self.cos_by_col(pred[sel_valid], truth[sel_valid])).mean() 
+        loss2 = (1 - self.cos_by_row(pred[sel_valid], truth[sel_valid])).mean()
+        return loss1 + loss2
+
+    def _zero_seg_loss(self, truth, pred):
+        sel = truth > 0
+
+
+
+    def loss(self, 
+             X: Tensor, 
+             Y: Tensor, 
+             wt_otho_u: float=1e-1,
+             wt_otho_v: float=1e-1,
+             wt_otho_v_p:  float=1e-1,
+             wt_rot_vv_p: float=1.0,
+             wt_imp_y: float=1.0,
+             wt_imp_x: float=1.0,
+             wt_spa: float=1.0,
+             ):
+        """_summary_
+
+        Args:
+            X (Tensor): _description_
+            Y (Tensor): _description_
+            wt_otho_u (float, optional): _description_. Defaults to 1e-1.
+            wt_otho_v (float, optional): _description_. Defaults to 1e-1.
+            wt_otho_v_p (float, optional): _description_. Defaults to 1e-1.
+            wt_rot_vv_p (float, optional): _description_. Defaults to 1.0.
+            wt_imp_y (float, optional): _description_. Defaults to 1.0.
+            wt_imp_x (float, optional): _description_. Defaults to 1.0.
+            truth_spa_stats (Tensor, optional): _description_. Defaults to None.
+
+        Returns:
+            _type_: _description_
+        """
+        Y_hat = self.trans(X)
+        Y_imp_loss = self._corr_loss(Y, Y_hat)
+
+        X_hat = self.tran(X, is_cell2spot=False, fix_u_s=True)
+        X_imp_loss = self._corr_loss(X, X_hat)
+
+        v_consts, u_consts = self.trans.cell2spot_consts()
+        rotate_consts, v_p_consts = self.trans.spot2cell_consts()
+
+        loss = (wt_imp_y * Y_imp_loss + wt_imp_x * X_imp_loss 
+                + wt_otho_u * u_consts + wt_otho_v * v_consts
+                + wt_otho_v_p * v_p_consts + wt_rot_vv_p * rotate_consts
+                )
+
+
+        if not self.spa_inst is None and wt_spa > 0:
+            spa_reg = self.spa_inst.loss(Y_hat)
+            loss = loss + wt_spa * spa_reg
+
+        return loss, Y_imp_loss.item(), X_imp_loss.item(), spa_reg.item() if not self.spa_inst is None and wt_spa > 0 else 0
+        
+        
+    def forward(self, X: Tensor):
+        """Translate
+
+        Args:
+            X (Tensor): Reference gene signature [Cell, Gene]
+
+        Returns:
+            Tuple[Tensor]: Prediction and translation weight matrix
+        """
+        # X is ? by gene
+        Y_hat = self.trans(X)
+        # Y_hat = (self.scaler_g * preds.t() + self.bias_g) * self.scaler_s
+        # Y_hat = (torch.exp(self.scaler_g) * preds.t() + self.bias_g ** 2) * torch.exp(self.scaler_s)
+        # Y_hat = (torch.exp(self.scaler_g) * self.nn_reg(X.t()).t() + self.bias_g**2) * torch.exp(self.scaler_s)
+        return Y_hat           
         
 
 
