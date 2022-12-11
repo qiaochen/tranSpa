@@ -14,7 +14,7 @@ CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
 
 
-class DualMapping(nn.Module):
+class DualMapper(nn.Module):
     """Linear dual mapping
 
     Args:
@@ -41,11 +41,18 @@ class DualMapping(nn.Module):
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
-            
-        self.U = nn.Parameter(torch.randn(n_spots, dim_hid))
+        
+        # https://discuss.pytorch.org/t/why-is-it-so-hard-to-enforce-a-weight-matrix-to-be-orthogonal/108888/2
+        self.U = torch.nn.init.orthogonal_(torch.empty(n_spots, dim_hid))
+        if  torch.slogdet (self.U.unsqueeze(0))[0] < 0.0:
+            self.U *= -1 
         self.log_Sigma = nn.Parameter(torch.zeros(dim_hid, 1))
-        self.V = nn.Parameter(torch.randn(n_cells, dim_hid))
-        self.V_prime = nn.Parameter(torch.randn(n_cells, dim_hid))
+        self.V = torch.nn.init.orthogonal_(torch.empty(n_cells, dim_hid))
+        if  torch.slogdet (self.V.unsqueeze(0))[0] < 0.0:
+            self.V *= -1 
+        self.V_prime = torch.nn.init.orthogonal_(torch.empty(n_cells, dim_hid))
+        if  torch.slogdet (self.V_prime.unsqueeze(0))[0] < 0.0:
+            self.V_prime *= -1
         self.dim_hid = dim_hid
         self.criterion = nn.MSELoss()
         
@@ -82,7 +89,7 @@ class DualMapping(nn.Module):
                 UT_Sigma = (self.U.t() / torch.exp(self.log_Sigma)).detach()
         else:
             UT_Sigma = (self.U.t() / torch.exp(self.log_Sigma))
-        return self.V_prime @ UT_Sigma @ Y
+        return self.V_prime @ (UT_Sigma @ Y)
     
     def cell2spot_consts(self):
         """_summary_
@@ -92,11 +99,11 @@ class DualMapping(nn.Module):
         u_consts = self.criterion(self.U.t() @ self.U, eye)
         return v_consts, u_consts
                         
-    def spot2cell_connts(self):
+    def spot2cell_consts(self):
         """_summary_
         """
-        rotate_consts = self.V_prime @ self.V.t(), torch.eye(self.V_prime.shape[0], device=self.device)
-        v_prime_consts = (self.V_prime.t() @ self.V_prime, torch.eye(self.dim_hid, device=self.device))
+        rotate_consts = self.criterion(self.V_prime @ self.V.t(), torch.eye(self.V_prime.shape[0], device=self.device))
+        v_prime_consts = self.criterion(self.V_prime.t() @ self.V_prime, torch.eye(self.dim_hid, device=self.device))
         return rotate_consts, v_prime_consts
     
     def forward(self, input, is_cell2spot=True, fix_u_s=True):
@@ -114,7 +121,6 @@ class DualMapping(nn.Module):
                  n_spots: int,
                  n_cells:  int,
                  dim_hid: int=512,
-                 clip_max: float=10,
                  spa_inst=None,
                  device:    torch.device=None,
                  seed:       int=None
@@ -145,7 +151,7 @@ class DualMapping(nn.Module):
         self.cos_by_col = nn.CosineSimilarity(dim=1)
         self.cos_by_row = nn.CosineSimilarity(dim=0)
         self.mse = nn.MSELoss(reduction='mean')
-        self.trans = DualMapping(n_spots=n_spots, 
+        self.trans = DualMapper(n_spots=n_spots, 
                                        n_cells=n_cells, 
                                        dim_hid=dim_hid, 
                                        device=device, 
@@ -171,6 +177,7 @@ class DualMapping(nn.Module):
     def _corr_loss(self, truth, pred):
         norm_pred = torch.norm(pred, dim=1)
         sel_valid = (norm_pred != 0) & ~torch.isnan(norm_pred) &  ~torch.isinf(norm_pred)
+        # return self.mse(pred, truth)
         loss1 = (1 - self.cos_by_col(pred[sel_valid], truth[sel_valid])).mean() 
         loss2 = (1 - self.cos_by_row(pred[sel_valid], truth[sel_valid])).mean()
         return loss1 + loss2
@@ -183,10 +190,10 @@ class DualMapping(nn.Module):
     def loss(self, 
              X: Tensor, 
              Y: Tensor, 
-             wt_otho_u: float=1e-1,
-             wt_otho_v: float=1e-1,
-             wt_otho_v_p:  float=1e-1,
-             wt_rot_vv_p: float=1.0,
+             wt_otho_u: float=0.1,
+             wt_otho_v: float=0.1,
+             wt_otho_v_p:  float=0.1,
+             wt_rot_vv_p: float=0.1,
              wt_imp_y: float=1.0,
              wt_imp_x: float=1.0,
              wt_spa: float=1.0,
@@ -210,16 +217,14 @@ class DualMapping(nn.Module):
         Y_hat = self.trans(X)
         Y_imp_loss = self._corr_loss(Y, Y_hat)
 
-        X_hat = self.tran(X, is_cell2spot=False, fix_u_s=True)
-        X_imp_loss = self._corr_loss(X, X_hat)
+        X_hat = self.trans(Y, is_cell2spot=False, fix_u_s=True)
+        X_imp_loss = self._corr_loss(X, X_hat) # self.mse(X, X_hat) # 
 
         v_consts, u_consts = self.trans.cell2spot_consts()
         rotate_consts, v_p_consts = self.trans.spot2cell_consts()
 
-        loss = (wt_imp_y * Y_imp_loss + wt_imp_x * X_imp_loss 
-                + wt_otho_u * u_consts + wt_otho_v * v_consts
-                + wt_otho_v_p * v_p_consts + wt_rot_vv_p * rotate_consts
-                )
+        loss = wt_imp_y * Y_imp_loss + wt_imp_x * X_imp_loss + wt_otho_u * u_consts + wt_otho_v * v_consts + wt_otho_v_p * v_p_consts + wt_rot_vv_p * rotate_consts
+                
 
 
         if not self.spa_inst is None and wt_spa > 0:
