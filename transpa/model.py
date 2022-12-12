@@ -28,90 +28,49 @@ class DualMapper(nn.Module):
         _type_: _description_
     """
     
-    def __init__(self, n_cells, 
-                       n_spots,
-                       dim_hid=100,
-                       device=None,
-                       seed=None,
-                       ) -> None:
+    def __init__(self,
+                 dim_input: int,
+                 dim_output: int,
+                 dim_hid: int=512,
+                 clip_max: float=10,
+                 seed: int=None,
+                 device: torch.device=None
+        ):
+        """
+
+        Args:
+            dim_input (int): dimension of reference gene profile
+            dim_output (int): dimension of target gene profile
+            dim_hid  (int): dimension of hidden layer. Defaults to 512.
+            clip_max (float): clipping threshold for output of first translation. Defaults to 10.
+            seed (int, optional): random seed. Defaults to None.
+            device (torch.device, optional): device of computation. Defaults to None.
+        """
+
         super().__init__()
         self.seed = seed
         self.device = device
+        self.clip_max = clip_max
         if not seed is None:
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
+
+        self.trans1 = nn.Parameter(torch.randn(dim_input, dim_hid))
+        self.trans2 = nn.Parameter(torch.randn(dim_output, dim_hid))
         
-        # https://discuss.pytorch.org/t/why-is-it-so-hard-to-enforce-a-weight-matrix-to-be-orthogonal/108888/2
-        self.U = torch.nn.init.orthogonal_(torch.empty(n_spots, dim_hid))
-        if  torch.slogdet (self.U.unsqueeze(0))[0] < 0.0:
-            self.U *= -1 
-        self.log_Sigma = nn.Parameter(torch.zeros(dim_hid, 1))
-        self.V = torch.nn.init.orthogonal_(torch.empty(n_cells, dim_hid))
-        if  torch.slogdet (self.V.unsqueeze(0))[0] < 0.0:
-            self.V *= -1 
-        self.V_prime = torch.nn.init.orthogonal_(torch.empty(n_cells, dim_hid))
-        if  torch.slogdet (self.V_prime.unsqueeze(0))[0] < 0.0:
-            self.V_prime *= -1
-        self.dim_hid = dim_hid
-        self.criterion = nn.MSELoss()
-        
+        self.rev_trans1 = nn.Parameter(torch.randn(dim_output, dim_hid))
+        self.rev_trans2 = nn.Parameter(torch.randn(dim_input, dim_hid))
+
+    def _get_weight_mtx(self):
+        return torch.softmax(self.trans2, dim=0) @ torch.clip(torch.square(self.trans1), max=self.clip_max).t()
+
     def cell2spot(self, X):
-        """Transform
-
-        Args:
-            X (Tensor): Cell by Gene Matrix
-
-        Raises:
-            Exception: _description_
-            Exception: _description_
-
-        Returns:
-            _type_: _description_
-        """
-        return self.U @ (torch.exp(self.log_Sigma) * self.V.t()) @ X
+        return torch.softmax(self.trans2, dim=0) @ (torch.clip(torch.square(self.trans1), max=self.clip_max).t() @ X)
     
-    def spot2cell(self, Y, fix_u_s=True):
-        """Transform from spots to cells
-
-        Args:
-            Y (Tensor): Spot by Gene Matrix
-
-        Raises:
-            Exception: _description_
-            Exception: _description_
-
-        Returns:
-            _type_: _description_
-        """
-        if fix_u_s:
-            with torch.no_grad():
-                UT_Sigma = (self.U.t() / torch.exp(self.log_Sigma)).detach()
-        else:
-            UT_Sigma = (self.U.t() / torch.exp(self.log_Sigma))
-        return self.V_prime @ (UT_Sigma @ Y)
+    def spot2cell(self, S):
+        return torch.square(self.rev_tran2) @ nn.functional.relu(torch.rev_trans1.t() @ S)
     
-    def cell2spot_consts(self):
-        """_summary_
-        """
-        eye = torch.eye(self.dim_hid, device=self.device)
-        v_consts = self.criterion(self.V.t() @ self.V, eye)
-        u_consts = self.criterion(self.U.t() @ self.U, eye)
-        return v_consts, u_consts
-                        
-    def spot2cell_consts(self):
-        """_summary_
-        """
-        rotate_consts = self.criterion(self.V_prime @ self.V.t(), torch.eye(self.V_prime.shape[0], device=self.device))
-        v_prime_consts = self.criterion(self.V_prime.t() @ self.V_prime, torch.eye(self.dim_hid, device=self.device))
-        return rotate_consts, v_prime_consts
-    
-    def forward(self, input, is_cell2spot=True, fix_u_s=True):
-        if is_cell2spot:
-            return self.cell2spot(input)
-        else:
-            return self.spot2cell(input, fix_u_s)
-
 
 class DualMapping(nn.Module):
     """Dual Translation-based spatial gene imputation     
@@ -122,6 +81,7 @@ class DualMapping(nn.Module):
                  n_cells:  int,
                  dim_hid: int=512,
                  spa_inst=None,
+                 clip_max: float=10,
                  device:    torch.device=None,
                  seed:       int=None
                 ):
@@ -151,9 +111,10 @@ class DualMapping(nn.Module):
         self.cos_by_col = nn.CosineSimilarity(dim=1)
         self.cos_by_row = nn.CosineSimilarity(dim=0)
         self.mse = nn.MSELoss(reduction='mean')
-        self.trans = DualMapper(n_spots=n_spots, 
-                                       n_cells=n_cells, 
+        self.trans = DualMapper(dim_output=n_spots, 
+                                       dim_input=n_cells, 
                                        dim_hid=dim_hid, 
+                                       clip_max=clip_max,
                                        device=device, 
                                        seed=seed)
         self.spa_inst = spa_inst
@@ -184,18 +145,12 @@ class DualMapping(nn.Module):
 
     def _zero_seg_loss(self, truth, pred):
         sel = truth > 0
-
-
-
+        
     def loss(self, 
              X: Tensor, 
-             Y: Tensor, 
-             wt_otho_u: float=0.1,
-             wt_otho_v: float=0.1,
-             wt_otho_v_p:  float=0.1,
-             wt_rot_vv_p: float=0.1,
-             wt_imp_y: float=1.0,
-             wt_imp_x: float=1.0,
+             Y: Tensor,
+             S: Tensor,
+             wt_dec: float=1.0,
              wt_spa: float=1.0,
              ):
         """_summary_
@@ -214,24 +169,16 @@ class DualMapping(nn.Module):
         Returns:
             _type_: _description_
         """
-        Y_hat = self.trans(X)
+        Y_hat = self.trans.cell2spot(X)
         Y_imp_loss = self._corr_loss(Y, Y_hat)
 
-        X_hat = self.trans(Y, is_cell2spot=False, fix_u_s=True)
-        X_imp_loss = self._corr_loss(X, X_hat) # self.mse(X, X_hat) # 
-
-        v_consts, u_consts = self.trans.cell2spot_consts()
-        rotate_consts, v_p_consts = self.trans.spot2cell_consts()
-
-        loss = wt_imp_y * Y_imp_loss + wt_imp_x * X_imp_loss + wt_otho_u * u_consts + wt_otho_v * v_consts + wt_otho_v_p * v_p_consts + wt_rot_vv_p * rotate_consts
-                
-
-
-        if not self.spa_inst is None and wt_spa > 0:
-            spa_reg = self.spa_inst.loss(Y_hat)
-            loss = loss + wt_spa * spa_reg
-
-        return loss, Y_imp_loss.item(), X_imp_loss.item(), spa_reg.item() if not self.spa_inst is None and wt_spa > 0 else 0
+        S_cell = self.trans.spot2cell(S)
+        deconv_reg = self.spa_inst.loss(X, S_cell)
+        spa_reg = self.spa_inst.loss(Y_hat)
+        
+        
+        loss = loss + wt_spa * spa_reg + wt_dec * deconv_reg
+        return loss, Y_imp_loss.item(), deconv_reg.item(), spa_reg.item()
         
         
     def forward(self, X: Tensor):
