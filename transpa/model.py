@@ -8,6 +8,7 @@ import numpy as np
 from turtle import forward
 from torch import Tensor, nn
 from typing import List, Tuple
+from pykeops.torch import LazyTensor
 
 CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
@@ -355,10 +356,11 @@ class SpaAutoCorr(SpaStats):
         x_i = LazyTensor(locs.unsqueeze(1))
         y_j = LazyTensor(locs.unsqueeze(0))
         D_ij = ((x_i - y_j) ** 2).sum(-1)
-        K_ij = (- D_ij / l).exp()
-        indices_i = D_ij.argKmin(K, dim=-1)
-        mask = torch.sparse_coo_tensor(indices=indices_i, values=torch.Tensor([1] * indices_i.shape[1] ), size=D_ij.shape)
-        adj = K_ij * mask
+        # K_ij = (- D_ij / l).exp()
+        indices_i = D_ij.argKmin(K+1, dim=-1)
+        K_ij = (((locs.unsqueeze(1) - locs[indices_i[:, 1:]])**2).sum(-1) * (-1/l)).exp() # remove self
+        indices_i = torch.LongTensor([np.repeat(range(locs.shape[0]), K), indices_i.cpu().numpy().flatten()])
+        adj = torch.sparse_coo_tensor(indices_i, K_ij.view(-1), size=D_ij.shape)
         return adj
 
     def cal_spa_stats(self, gene_expr, sparse_adj=None):
