@@ -8,7 +8,6 @@ import numpy as np
 from turtle import forward
 from torch import Tensor, nn
 from typing import List, Tuple
-from pykeops.torch import LazyTensor
 
 CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
