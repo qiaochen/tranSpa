@@ -401,7 +401,7 @@ def expLocImp(
             dim_hid=mapping_lowdim,
             seed=seed,
             device=device
-    )
+    ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)        
     pbar = tqdm(range(n_epochs))
