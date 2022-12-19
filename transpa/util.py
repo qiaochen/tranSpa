@@ -11,7 +11,7 @@ from sklearn.metrics.pairwise import rbf_kernel
 
 from tqdm import tqdm
 
-from .model import TransDeconv, TransImp, SpaAutoCorr, SparkX, SpaReg, DualMapping
+from .model import TransDeconv, TransImp, SpaAutoCorr, SparkX, SpaReg, LocImp
 from .eval_util import spark_stat
 
 
@@ -80,36 +80,6 @@ def signature(classes, ct_list, expr_mtx):
     g_cls_sig = np.vstack([np.sum(expr_mtx[classes == cls], axis=0, keepdims=True) for cls in ct_list])
     cls_abd_sig = np.array([(classes == cls).sum() for cls in ct_list]).reshape(-1, 1)
     return g_cls_sig, cls_abd_sig
-
-def expImpute(df_ref, df_tgt, train_genes, 
-             test_genes,
-             ae_wt, kld_wt=1.0,
-             lr=1e-3, weight_decay=1e-2, n_epochs=1000,
-             dim_hid_AE=512, 
-             dim_hid_RG=None,
-             pca_low_dim=2000, 
-             n_top_genes=2000,
-             device=None,
-             seed=None):
-    if pca_low_dim is not None:
-        pca_low_dim = min(pca_low_dim, df_ref.shape[0]-1)
-    if not n_top_genes is None and n_top_genes > 0:
-        n_top_genes = min(n_top_genes, df_ref.shape[1])
-    model, test_X = fit_base(df_ref, df_tgt, train_genes, 
-                            test_genes,
-                            ae_wt, kld_wt,
-                            lr, weight_decay, n_epochs,
-                            dim_hid_AE, 
-                            dim_hid_RG,
-                            pca_low_dim, 
-                            n_top_genes,
-                            device=device,
-                            seed=seed) 
-    with torch.no_grad():
-        model.eval()
-        pred_Y = model.predict(test_X)
-    return pred_Y
-
 
 def train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa=1.0,
                    truth_autocorr=None, method_autocorr='moranI'):
@@ -401,116 +371,166 @@ def expVeloImp(df_ref, df_tgt, S, U, V, train_gene, test_gene, classes=None, ct_
     return _S, _U, _V, X
 
 
-    ############# expDualImp ###############
+################ expLocImp #################
 
-def train_dual_imp_step(optimizer, model, X, Y, wt_spa=0.1, truth_spa_stats=None):
-    model.train()
-    optimizer.zero_grad()
-    loss, spot_imp_loss, cell_imp_loss, spa_reg = model.loss(X, Y, 
-                           wt_spa=wt_spa)
-    loss.backward()
-    optimizer.step()
-    info = f'loss: {loss.item():.6f}, (IMP_SPA) {spot_imp_loss:.6f} (IMP_CELL) {cell_imp_loss:.6f}' 
-    info += f', (SPA) {wt_spa} x {spa_reg:.6f}'
-    return info
+def expLocImp(
+             sc_expr, 
+             sp_expr,
+             loc,
+             n_neighbors=6,
+             l_kernel=2,
+             autocorr_method='moranI',
+             mapping_lowdim=128,
+             lr=1e-3, weight_decay=1e-2, n_epochs=2000,
+             device=None,
+             seed=None):
 
+    sp_expr = tensify(sp_expr, device)
+    loc     = tensify(loc, device)
+    sc_expr = tensify(sc_expr, device, is_dense= not sparse.issparse(sc_expr))
 
-def fit_dualmapping(
-            df_ref, df_tgt, 
-            train_gene, test_gene,
-            lr, weight_decay, 
-            n_epochs,
-            classes,
-            ct_list,
-            autocorr_method,
-            mapping_mode,
-            mapping_lowdim,
-            spa_adj,
-            clip_max=10,
-            signature_mode='cluster',
-            wt_spa=1e-1,
-            locations=None,
-            rank_margin=0,
-            device=None,
-            seed=None):
-        
-    X = df_ref[train_gene].values
-    Y = df_tgt[train_gene].values
-
-    # is class by gene
-    Y = tensify(Y, device)
-    X = tensify(X, device)
-    
-    spa_inst = None
-    if not locations is None:
-        locations = tensify(locations, device)
-        spa_inst = SparkX(locations)
-
-    if not spa_adj is None:
-        spa_adj = torch.sparse_coo_tensor(indices=np.array([spa_adj.row, spa_adj.col]),
-                                                values=spa_adj.data,
-                                                size=spa_adj.shape).to(device).float()
-        spa_inst = SpaAutoCorr(Y, spa_adj, method=autocorr_method)
-        # spa_inst = SpaReg(spa_adj, spa_adj @ Y, margin=rank_margin)
-        # spa_inst = LocSpaAutoCorr(Y, spa_adj, method=autocorr_method)
-    model = DualMapping(
-                n_spots=Y.shape[0],
-                n_cells=X.shape[0],
-                dim_hid=mapping_lowdim,
-                spa_inst=spa_inst,                
-                device=device,
-                seed=seed).to(device)
-    
-    # if not spa_inst is None:
-    #     with torch.no_grad():
-    #         # tru_spa_stats = model.spa_inst.cal_spa_stats(Y)
-    #         model.spa_inst.set_truth_stats(model.spa_inst.cal_spa_stats(Y))
-
+    model = LocImp(
+            n_spots=sp_expr.shape[0],
+            n_cells=sc_expr.shape[0],
+            sp_expr=sp_expr,
+            sp_locs=loc,
+            sc_expr=sc_expr,
+            K=n_neighbors,
+            l=l_kernel,
+            method=autocorr_method,
+            dim_hid=mapping_lowdim,
+            seed=seed,
+            device=device
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)        
     pbar = tqdm(range(n_epochs))
 
     for ith_epoch in pbar:
-        # info  = train_imp_step(optimizer, model, X, Y, wt_spa, wt_l1norm, wt_l2norm, None if spa_inst is None else tru_spa_stats)
-        info  = train_dual_imp_step(optimizer, model, X, Y, wt_spa)
-        pbar.set_description(f"[TransImp] Epoch: {ith_epoch+1}/{n_epochs}, {info}") 
+        model.train()
+        optimizer.zero_grad()
+        loss  = model.loss()
+        loss.backward()
+        optimizer.step()
+        info = f'loss: {loss.item():.6f}'
+        pbar.set_description(f"[LocImp] Epoch: {ith_epoch+1}/{n_epochs}, {info}")
 
-    if signature_mode == 'cluster':
-        test_X, _ = signature(classes, ct_list, df_ref[test_gene].values)
-        # test_X = df_ref[test_gene].values
-        test_X = tensify(test_X, device)
-    else:
-        test_X = tensify(df_ref[test_gene].values, device)
-    return model, test_X
-
-def expDualMapping(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=None,
-             autocorr_method='moranI', signature_mode='cluster',
-             mapping_mode='full',
-             mapping_lowdim=256,
-             spa_adj=None,
-             lr=1e-2, weight_decay=1e-2, n_epochs=1000,
-             clip_max=10,
-             wt_spa=1.0,
-             locations=None,
-             device=None,
-             seed=None):
-    model, test_X = fit_dualmapping(
-                            df_ref, df_tgt,
-                            train_gene, test_gene,
-                            lr, weight_decay, n_epochs,
-                            classes,
-                            ct_list,
-                            autocorr_method, 
-                            mapping_mode,
-                            mapping_lowdim,
-                            spa_adj,
-                            clip_max=clip_max,
-                            signature_mode=signature_mode,
-                            wt_spa=wt_spa,
-                            locations=locations,
-                            device=device,
-                            seed=seed) 
     with torch.no_grad():
-        model.eval()
-        preds = model.predict(test_X)
-    return preds
+        sc_locs = model(loc).cpu().numpy()
+    return sc_locs
+
+
+    
+    ############# expDualImp ###############
+
+# def train_dual_imp_step(optimizer, model, X, Y, wt_spa=0.1, truth_spa_stats=None):
+#     model.train()
+#     optimizer.zero_grad()
+#     loss, spot_imp_loss, cell_imp_loss, spa_reg = model.loss(X, Y, 
+#                            wt_spa=wt_spa)
+#     loss.backward()
+#     optimizer.step()
+#     info = f'loss: {loss.item():.6f}, (IMP_SPA) {spot_imp_loss:.6f} (IMP_CELL) {cell_imp_loss:.6f}' 
+#     info += f', (SPA) {wt_spa} x {spa_reg:.6f}'
+#     return info
+
+
+# def fit_dualmapping(
+#             df_ref, df_tgt, 
+#             train_gene, test_gene,
+#             lr, weight_decay, 
+#             n_epochs,
+#             classes,
+#             ct_list,
+#             autocorr_method,
+#             mapping_mode,
+#             mapping_lowdim,
+#             spa_adj,
+#             clip_max=10,
+#             signature_mode='cluster',
+#             wt_spa=1e-1,
+#             locations=None,
+#             rank_margin=0,
+#             device=None,
+#             seed=None):
+        
+#     X = df_ref[train_gene].values
+#     Y = df_tgt[train_gene].values
+
+#     # is class by gene
+#     Y = tensify(Y, device)
+#     X = tensify(X, device)
+    
+#     spa_inst = None
+#     if not locations is None:
+#         locations = tensify(locations, device)
+#         spa_inst = SparkX(locations)
+
+#     if not spa_adj is None:
+#         spa_adj = torch.sparse_coo_tensor(indices=np.array([spa_adj.row, spa_adj.col]),
+#                                                 values=spa_adj.data,
+#                                                 size=spa_adj.shape).to(device).float()
+#         spa_inst = SpaAutoCorr(Y, spa_adj, method=autocorr_method)
+#         # spa_inst = SpaReg(spa_adj, spa_adj @ Y, margin=rank_margin)
+#         # spa_inst = LocSpaAutoCorr(Y, spa_adj, method=autocorr_method)
+#     model = DualMapping(
+#                 n_spots=Y.shape[0],
+#                 n_cells=X.shape[0],
+#                 dim_hid=mapping_lowdim,
+#                 spa_inst=spa_inst,                
+#                 device=device,
+#                 seed=seed).to(device)
+    
+#     # if not spa_inst is None:
+#     #     with torch.no_grad():
+#     #         # tru_spa_stats = model.spa_inst.cal_spa_stats(Y)
+#     #         model.spa_inst.set_truth_stats(model.spa_inst.cal_spa_stats(Y))
+
+
+#     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)        
+#     pbar = tqdm(range(n_epochs))
+
+#     for ith_epoch in pbar:
+#         # info  = train_imp_step(optimizer, model, X, Y, wt_spa, wt_l1norm, wt_l2norm, None if spa_inst is None else tru_spa_stats)
+#         info  = train_dual_imp_step(optimizer, model, X, Y, wt_spa)
+#         pbar.set_description(f"[TransImp] Epoch: {ith_epoch+1}/{n_epochs}, {info}") 
+
+#     if signature_mode == 'cluster':
+#         test_X, _ = signature(classes, ct_list, df_ref[test_gene].values)
+#         # test_X = df_ref[test_gene].values
+#         test_X = tensify(test_X, device)
+#     else:
+#         test_X = tensify(df_ref[test_gene].values, device)
+#     return model, test_X
+
+# def expDualMapping(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=None,
+#              autocorr_method='moranI', signature_mode='cluster',
+#              mapping_mode='full',
+#              mapping_lowdim=256,
+#              spa_adj=None,
+#              lr=1e-2, weight_decay=1e-2, n_epochs=1000,
+#              clip_max=10,
+#              wt_spa=1.0,
+#              locations=None,
+#              device=None,
+#              seed=None):
+#     model, test_X = fit_dualmapping(
+#                             df_ref, df_tgt,
+#                             train_gene, test_gene,
+#                             lr, weight_decay, n_epochs,
+#                             classes,
+#                             ct_list,
+#                             autocorr_method, 
+#                             mapping_mode,
+#                             mapping_lowdim,
+#                             spa_adj,
+#                             clip_max=clip_max,
+#                             signature_mode=signature_mode,
+#                             wt_spa=wt_spa,
+#                             locations=locations,
+#                             device=device,
+#                             seed=seed) 
+#     with torch.no_grad():
+#         model.eval()
+#         preds = model.predict(test_X)
+#     return preds

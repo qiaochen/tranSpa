@@ -197,6 +197,150 @@ CANO_NAME_GEARYSC = 'gearyC'
 #         # Y_hat = (torch.exp(self.scaler_g) * self.nn_reg(X.t()).t() + self.bias_g**2) * torch.exp(self.scaler_s)
 #         return Y_hat           
         
+class LocImp(nn.Module):
+    """Linear translator
+    """
+
+    def __init__(self,
+                 n_spots: int,
+                 n_cells: int,
+                 sp_expr,
+                 sp_locs,
+                 sc_expr,
+                 K: int=6,
+                 l: float=2,
+                 method: str=CANO_NAME_MORANSI,
+                 dim_hid: int=128,
+                 seed: int=None,
+                 device: torch.device=None
+        ):
+        """
+
+        Args:
+            dim_input (int): dimension of reference gene profile
+            dim_output (int): dimension of target gene profile
+            dim_hid  (int): dimension of hidden layer. Defaults to 512.
+            seed (int, optional): random seed. Defaults to None.
+            device (torch.device, optional): device of computation. Defaults to None.
+        """
+
+        super().__init__()
+        self.seed = seed
+        self.device = device
+        if not seed is None:
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+
+        self.trans1 = nn.Parameter(torch.randn(dim_hid, n_spots))
+        self.trans2 = nn.Parameter(torch.randn(n_cells, dim_hid))
+        self.sc_expr = sc_expr
+        self.sp_locs = sp_locs
+        self.K = K
+        self.l = l
+        
+        if not method in {CANO_NAME_MORANSI, CANO_NAME_GEARYSC}:
+            raise Exception("Unimplemented autocorrelation method!")
+        self.method = method
+        with torch.no_grad():
+            self.truth_stats = self.cal_spa_stats(sp_expr, sp_locs)
+        self.mse = nn.MSELoss()
+
+    def _moransI_numerator_sparse_adj(self, centered_expr, sparse_adj):
+        numerator = torch.sum(centered_expr * torch.sparse.mm(sparse_adj, centered_expr.t()).t(), dim=1)
+        return numerator
+
+    def _gearysI_numerator_sparse_adj(self, gene_expr, sparse_adj):
+        # I use a trick from Laplacian Eigenmaps for computing the numerator
+        # \sum_{i,j} w_ij ||z_i - z_j||^2 = 2 * Trace(Z(D - W)Z^T)
+        # To test:
+        # from scipy import sparse
+        # _W = np.abs(np.random.randn(4, 4))
+        # W = _W @ _W.T
+        # W -= np.diag(W.diagonal())
+        # Y = np.random.randn(4, 1)
+        # D = W.sum(axis=1)
+        # np.sum((Y - Y.T)**2 * W), 2 * np.sum(D * Y.flatten() ** 2) - 2 * Y.T @ W @ Y
+        degrees = torch.sparse.sum(sparse_adj, dim=1).to_dense()
+        # Trace(ZDZ^T), since z_i is 1-d vector, we can simplify the computation as follows
+        traceZDZ_T = (degrees.view(1,-1) * torch.square(gene_expr)).sum(dim=1)
+        # Trace(ZWZ^T), since z_i is 1-d vector, we can simplify the computation as follows
+        traceZWZ_T = torch.sum(gene_expr * torch.sparse.mm(sparse_adj, gene_expr.t()).t(), dim=1)
+        numerator = 2 * (traceZDZ_T - traceZWZ_T)
+        return numerator
+       
+
+    def cal_spa_stats(self, gene_expr, locs):
+        """_summary_
+
+        Args:
+            gene_expr (_type_): n by g
+            locs (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        method = self.method
+        gene_expr = gene_expr.t()
+        sparse_adj = self.loc2adj(locs, self.K, self.l)
+        W = torch.sparse.sum(sparse_adj) # check if need to stop gradient here
+        N = gene_expr.shape[1]
+        centered_expr = gene_expr - torch.mean(gene_expr, dim=1, keepdim=True)
+        denominator = torch.sum(torch.square(centered_expr), dim=1)
+        
+        if (denominator == 0).any():
+            mask = torch.zeros_like(denominator)
+            mask[denominator == 0] = 1e-6
+            denominator = denominator + mask
+
+        if method == CANO_NAME_MORANSI:
+            numerator_I = self._moransI_numerator_sparse_adj(centered_expr, sparse_adj)
+            return N/W * numerator_I / denominator
+
+        if method == CANO_NAME_GEARYSC:
+            numerator_C = self._gearysI_numerator_sparse_adj(gene_expr, sparse_adj)
+            return (N - 1)/ (2*W) * numerator_C / denominator
+        return None        
+
+    def _get_weight_mtx(self):
+        return self.trans2 @ self.trans1
+
+    def transform(self, loc):
+        return self.trans2 @ self.trans1 @ loc
+
+    def sparse_reg(self):
+        return torch.norm(torch.square(self.trans1), p=1, dim=0).mean() + \
+                torch.norm(torch.square(self.trans2), p=1, dim=0).mean()
+
+    def forward(self, input: Tensor):
+        """
+
+        Args:
+            input (Tensor): Reference gene signature
+            only_pred (bool, optional): not return weights or return. Defaults to True.
+
+        Returns:
+            : Translation results [translation weight matrix [Spot, Cell] ] 
+        """
+        trans = self.transform(input)
+        return trans
+
+    def loc2adj(self, locs, K=6, l=2.0):
+        x_i = LazyTensor(locs.unsqueeze(1))
+        y_j = LazyTensor(locs.unsqueeze(0))
+        D_ij = ((x_i - y_j) ** 2).sum(-1)
+        # K_ij = (- D_ij / l).exp()
+        indices_i = D_ij.argKmin(K+1, dim=-1)
+        K_ij = (((locs.unsqueeze(1) - locs[indices_i[:, 1:]])**2).sum(-1) * (-1/l)).exp() # remove self
+        indices_i = torch.LongTensor([np.repeat(range(locs.shape[0]), K), indices_i.cpu().numpy().flatten()])
+        adj = torch.sparse_coo_tensor(indices_i, K_ij.view(-1), size=D_ij.shape)
+        return adj   
+
+    def loss(self):
+        sc_locs = self(self.sp_locs)
+        sc_expr = self.sc_expr
+        spa_stats = self.cal_spa_stats(sc_expr, sc_locs)
+        return self.mse(self.truth_stats, spa_stats)       
 
 
 class LinTranslator(nn.Module):
@@ -351,22 +495,12 @@ class SpaAutoCorr(SpaStats):
         traceZWZ_T = torch.sum(gene_expr * torch.sparse.mm(sparse_adj, gene_expr.t()).t(), dim=1)
         numerator = 2 * (traceZDZ_T - traceZWZ_T)
         return numerator
-    
-    def loc2adj(self, locs, K=6, l=2.0):
-        x_i = LazyTensor(locs.unsqueeze(1))
-        y_j = LazyTensor(locs.unsqueeze(0))
-        D_ij = ((x_i - y_j) ** 2).sum(-1)
-        # K_ij = (- D_ij / l).exp()
-        indices_i = D_ij.argKmin(K+1, dim=-1)
-        K_ij = (((locs.unsqueeze(1) - locs[indices_i[:, 1:]])**2).sum(-1) * (-1/l)).exp() # remove self
-        indices_i = torch.LongTensor([np.repeat(range(locs.shape[0]), K), indices_i.cpu().numpy().flatten()])
-        adj = torch.sparse_coo_tensor(indices_i, K_ij.view(-1), size=D_ij.shape)
-        return adj
+       
 
-    def cal_spa_stats(self, gene_expr, sparse_adj=None):
+    def cal_spa_stats(self, gene_expr):
         method = self.method
         gene_expr = gene_expr.t()
-        sparse_adj = self.spa_adj if sparse_adj is None else sparse_adj
+        sparse_adj = self.spa_adj
         W = torch.sparse.sum(sparse_adj) # check if need to stop gradient here
         N = gene_expr.shape[1]
         centered_expr = gene_expr - torch.mean(gene_expr, dim=1, keepdim=True)
