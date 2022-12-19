@@ -329,11 +329,11 @@ class LocImp(nn.Module):
         x_i = LazyTensor(locs.unsqueeze(1))
         y_j = LazyTensor(locs.unsqueeze(0))
         D_ij = ((x_i - y_j) ** 2).sum(-1)
-        # K_ij = (- D_ij / l).exp()
-        indices_i = D_ij.argKmin(K+1, dim=-1)
-        K_ij = (((locs.unsqueeze(1) - locs[indices_i[:, 1:]])**2).sum(-1) * (-1/l)).exp() # remove self
-        indices_i = torch.LongTensor([np.repeat(range(locs.shape[0]), K), indices_i.cpu().numpy().flatten()])
-        adj = torch.sparse_coo_tensor(indices_i, K_ij.view(-1), size=D_ij.shape)
+        
+        indices_i = D_ij.argKmin(K+1, dim=1)[:, 1:] # remove self
+        K_ij = (((locs.unsqueeze(1) - locs[indices_i])**2).sum(-1) * (-1/l)).exp()
+        indices_i = torch.LongTensor([np.repeat(range(locs.shape[0]), K), indices_i.cpu().numpy().flatten()]).to(self.device)
+        adj = torch.sparse_coo_tensor(indices_i, K_ij.view(-1), size=D_ij.shape, device=self.device)
         return adj   
 
     def loss(self):
