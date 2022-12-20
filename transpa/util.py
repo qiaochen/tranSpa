@@ -417,6 +417,7 @@ def expLocImp(
 
     with torch.no_grad():
         sc_locs = model(loc).cpu().numpy()
+        print(model.cal_spa_stats(model.sc_expr, model(model.sp_locs)).cpu().numpy())
     return sc_locs
 
 

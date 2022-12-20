@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from typing import List, Tuple
 from pykeops.torch import LazyTensor
 
+
 CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
 
@@ -234,8 +235,9 @@ class LocImp(nn.Module):
 
         self.trans1 = nn.Parameter(torch.randn(dim_hid, n_spots))
         self.trans2 = nn.Parameter(torch.randn(n_cells, dim_hid))
-        self.sc_expr = sc_expr
+        self.sc_expr = sc_expr.cpu().to_dense().to(device)
         self.sp_locs = sp_locs
+        self.sp_expr = sp_expr
         self.K = K
         self.l = l
         
@@ -244,6 +246,7 @@ class LocImp(nn.Module):
         self.method = method
         with torch.no_grad():
             self.truth_stats = self.cal_spa_stats(sp_expr, sp_locs)
+            print(self.truth_stats)
         self.mse = nn.MSELoss()
 
     def _moransI_numerator_sparse_adj(self, centered_expr, sparse_adj):
@@ -281,11 +284,14 @@ class LocImp(nn.Module):
             _type_: _description_
         """
         method = self.method
-        gene_expr = gene_expr.t()
+        gene_expr = gene_expr.t().to(self.device)
         sparse_adj = self.loc2adj(locs, self.K, self.l)
-        W = torch.sparse.sum(sparse_adj) # check if need to stop gradient here
+        # with torch.no_grad():
+        W = torch.sparse.sum(sparse_adj) # .detach() # check if need to stop gradient here
         N = gene_expr.shape[1]
+        
         centered_expr = gene_expr - torch.mean(gene_expr, dim=1, keepdim=True)
+        # centered_expr =  - (torch.sparse.sum(gene_expr, dim=1).to_dense().view(-1, 1) / gene_expr.shape[1]).expand(-1, gene_expr.shape[1]) + gene_expr
         denominator = torch.sum(torch.square(centered_expr), dim=1)
         
         if (denominator == 0).any():
@@ -306,7 +312,7 @@ class LocImp(nn.Module):
         return self.trans2 @ self.trans1
 
     def transform(self, loc):
-        return self.trans2 @ self.trans1 @ loc
+        return self.trans2 @ torch.nn.functional.relu(self.trans1 @ loc)
 
     def sparse_reg(self):
         return torch.norm(torch.square(self.trans1), p=1, dim=0).mean() + \
@@ -340,7 +346,10 @@ class LocImp(nn.Module):
         sc_locs = self(self.sp_locs)
         sc_expr = self.sc_expr
         spa_stats = self.cal_spa_stats(sc_expr, sc_locs)
-        return self.mse(self.truth_stats, spa_stats)       
+        # sc_hat = self.trans2 @ self.trans1 @ self.sp_expr
+        if torch.isnan(spa_stats).any():
+            print(torch.isnan(spa_stats).sum().item())
+        return self.mse(self.truth_stats, spa_stats) # + self.mse(sc_expr, sc_hat)
 
 
 class LinTranslator(nn.Module):
