@@ -233,8 +233,11 @@ class LocImp(nn.Module):
             random.seed(seed)
             np.random.seed(seed)
 
-        self.trans1 = nn.Parameter(torch.randn(dim_hid, n_spots))
-        self.trans2 = nn.Parameter(torch.randn(n_cells, dim_hid))
+        self.transX1 = nn.Parameter(torch.randn(dim_hid, n_spots))
+        self.transX2 = nn.Parameter(torch.randn(n_cells, dim_hid))
+        self.transY1 = nn.Parameter(torch.randn(dim_hid, n_spots))
+        self.transY2 = nn.Parameter(torch.randn(n_cells, dim_hid))
+        # self.sc_locs  = nn.Parameter(torch.randn(n_cells, 2))
         self.sc_expr = sc_expr.cpu().to_dense().to(device)
         self.sp_locs = sp_locs
         self.sp_expr = sp_expr
@@ -306,13 +309,16 @@ class LocImp(nn.Module):
         if method == CANO_NAME_GEARYSC:
             numerator_C = self._gearysI_numerator_sparse_adj(gene_expr, sparse_adj)
             return (N - 1)/ (2*W) * numerator_C / denominator
-        return None        
+        return None
 
-    def _get_weight_mtx(self):
-        return self.trans2 @ self.trans1
+    # def _get_weight_mtx(self):
+    #     return self.trans2 @ self.trans1
 
     def transform(self, loc):
-        return self.trans2 @ torch.nn.functional.relu(self.trans1 @ loc)
+        X_trans = self.transX2 @ self.transX1 @ loc[:, 0].view(-1, 1)
+        Y_trans = self.transY2 @ self.transY1 @ loc[:, 1].view(-1, 1)
+        return torch.hstack([X_trans, Y_trans])
+        # return self.sc_locs
 
     def sparse_reg(self):
         return torch.norm(torch.square(self.trans1), p=1, dim=0).mean() + \
@@ -340,16 +346,26 @@ class LocImp(nn.Module):
         K_ij = (((locs.unsqueeze(1) - locs[indices_i])**2).sum(-1) * (-1/l)).exp()
         indices_i = torch.LongTensor([np.repeat(range(locs.shape[0]), K), indices_i.cpu().numpy().flatten()]).to(self.device)
         adj = torch.sparse_coo_tensor(indices_i, K_ij.view(-1), size=D_ij.shape, device=self.device)
-        return adj   
+        return adj  
 
-    def loss(self):
+    def local_structure_loss(self, sp_locs, sc_locs, delta=0.01):
+        sc_i = LazyTensor(sc_locs.unsqueeze(1))
+        sp_j = LazyTensor(sp_locs.unsqueeze(0))
+        D_ij = ((sc_i - sp_j) ** 2).sum(-1)
+        indices_i = D_ij.argKmin(4, dim=1)[:, 1:]# .view(-1, 1) # remove self
+        dists = ((sc_locs.unsqueeze(1) - sp_locs[indices_i].unsqueeze(0) ) ** 2).sum(-1)
+        return dists.mean(-1).mean()
+
+    def loss(self, wt_lstr_loss=1.0):
         sc_locs = self(self.sp_locs)
         sc_expr = self.sc_expr
         spa_stats = self.cal_spa_stats(sc_expr, sc_locs)
-        # sc_hat = self.trans2 @ self.trans1 @ self.sp_expr
+        
+        lstr_loss = self.local_structure_loss(self.sp_locs, sc_locs)
+
         if torch.isnan(spa_stats).any():
             print(torch.isnan(spa_stats).sum().item())
-        return self.mse(self.truth_stats, spa_stats) # + self.mse(sc_expr, sc_hat)
+        return self.mse(self.truth_stats, spa_stats)  + wt_lstr_loss * lstr_loss # + self.mse(sc_expr, sc_hat)
 
 
 class LinTranslator(nn.Module):
