@@ -208,6 +208,7 @@ class LocImp(nn.Module):
                  sp_expr,
                  sp_locs,
                  sc_expr,
+                 sc_locs,
                  K: int=6,
                  l: float=2,
                  method: str=CANO_NAME_MORANSI,
@@ -233,12 +234,18 @@ class LocImp(nn.Module):
             random.seed(seed)
             np.random.seed(seed)
 
-        self.transX1 = nn.Parameter(torch.randn(dim_hid, n_spots))
-        self.transX2 = nn.Parameter(torch.randn(n_cells, dim_hid))
-        self.transY1 = nn.Parameter(torch.randn(dim_hid, n_spots))
-        self.transY2 = nn.Parameter(torch.randn(n_cells, dim_hid))
-        # self.sc_locs  = nn.Parameter(torch.randn(n_cells, 2))
+        # self.transX1 = nn.Parameter(torch.randn(dim_hid, n_spots))
+        # self.transX2 = nn.Parameter(torch.randn(n_cells, dim_hid))
+        # self.transY1 = nn.Parameter(torch.randn(dim_hid, n_spots))
+        # self.transY2 = nn.Parameter(torch.randn(n_cells, dim_hid))
+        # self.cos_by_col = nn.CosineSimilarity(dim=1)
+        # self.cos_by_row = nn.CosineSimilarity(dim=0)
+        # self.trans1 = nn.Parameter(torch.randn(dim_hid, n_spots))
+        # self.trans2 = nn.Parameter(torch.randn(n_cells, dim_hid))
         self.sc_expr = sc_expr.cpu().to_dense().to(device)
+        self.anchor = sc_locs # self._init_sc_locs(self.sc_expr, sp_expr, sp_locs)
+        self.offset = nn.Parameter(torch.zeros(n_cells, 2))
+        # self.sc_locs  = nn.Parameter(torch.randn(n_cells, 2))
         self.sp_locs = sp_locs
         self.sp_expr = sp_expr
         self.K = K
@@ -251,6 +258,17 @@ class LocImp(nn.Module):
             self.truth_stats = self.cal_spa_stats(sp_expr, sp_locs)
             print(self.truth_stats)
         self.mse = nn.MSELoss()
+
+    def _init_sc_locs(self, sc_expr, sp_expr, sp_locs, K=2):
+        with torch.no_grad():
+            sc_expr = torch.nn.functional.normalize(sc_expr, dim=1, p=2)
+            sp_expr = torch.nn.functional.normalize(sp_expr, dim=1, p=2)
+            x_i = LazyTensor(sc_expr.unsqueeze(1))  # (N, 1, D) samples
+            c_j = LazyTensor(sp_expr.unsqueeze(0))  # (1, K, D) centroids
+            S_ij = x_i | c_j  # (N, K) symbolic Gram matrix of dot products
+            cl = S_ij.argKmin(K, dim=1)  # Points -> Nearest cluster
+        return sp_locs[cl].mean(dim=1) # should be N by 2
+
 
     def _moransI_numerator_sparse_adj(self, centered_expr, sparse_adj):
         numerator = torch.sum(centered_expr * torch.sparse.mm(sparse_adj, centered_expr.t()).t(), dim=1)
@@ -315,10 +333,12 @@ class LocImp(nn.Module):
     #     return self.trans2 @ self.trans1
 
     def transform(self, loc):
-        X_trans = self.transX2 @ self.transX1 @ loc[:, 0].view(-1, 1)
-        Y_trans = self.transY2 @ self.transY1 @ loc[:, 1].view(-1, 1)
-        return torch.hstack([X_trans, Y_trans])
+        # X_trans = self.transX2 @ self.transX1 @ loc[:, 0].view(-1, 1)
+        # Y_trans = self.transY2 @ self.transY1 @ loc[:, 1].view(-1, 1)
+        # return torch.hstack([X_trans, Y_trans])
         # return self.sc_locs
+        # return self.trans2 @ (self.trans1 @ loc)
+        return self.anchor + self.offset
 
     def sparse_reg(self):
         return torch.norm(torch.square(self.trans1), p=1, dim=0).mean() + \
@@ -360,12 +380,17 @@ class LocImp(nn.Module):
         sc_locs = self(self.sp_locs)
         sc_expr = self.sc_expr
         spa_stats = self.cal_spa_stats(sc_expr, sc_locs)
-        
-        lstr_loss = self.local_structure_loss(self.sp_locs, sc_locs)
+        # sc_hat = self.transform(self.sp_expr)
+        # lstr_loss = self.local_structure_loss(self.sp_locs, sc_locs)
+        # norm_sc_hat = torch.norm(sc_hat, dim=1)
+        # sel_valid = (norm_sc_hat != 0) & ~torch.isnan(norm_sc_hat) &  ~torch.isinf(norm_sc_hat)
 
-        if torch.isnan(spa_stats).any():
-            print(torch.isnan(spa_stats).sum().item())
-        return self.mse(self.truth_stats, spa_stats)  + wt_lstr_loss * lstr_loss # + self.mse(sc_expr, sc_hat)
+        # loss1 = (1 - self.cos_by_col(sc_hat[sel_valid], sc_expr[sel_valid])).mean() 
+        # loss2 = (1 - self.cos_by_row(sc_hat[sel_valid], sc_expr[sel_valid])).mean()
+        # if torch.isnan(spa_stats).any():
+        #     print(torch.isnan(spa_stats).sum().item())
+        l2norm_square  = torch.square(self.offset).sum() # torch.sum(torch.norm(self.offset, dim=1, p=2)**2) 
+        return self.mse(self.truth_stats, spa_stats) # + l2norm_square #  + loss1 + loss2 #+ wt_lstr_loss * lstr_loss # 
 
 
 class LinTranslator(nn.Module):

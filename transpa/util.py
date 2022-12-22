@@ -8,8 +8,11 @@ import squidpy as sq
 from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import rbf_kernel
+import scanpy as sc
 
 from tqdm import tqdm
+from sklearn.neighbors import  NearestNeighbors
+from scipy.special import softmax
 
 from .model import TransDeconv, TransImp, SpaAutoCorr, SparkX, SpaReg, LocImp
 from .eval_util import spark_stat
@@ -373,6 +376,19 @@ def expVeloImp(df_ref, df_tgt, S, U, V, train_gene, test_gene, classes=None, ct_
 
 ################ expLocImp #################
 
+def projection(sc_expr, sp_expr, loc, K=3):
+    adata = sc.AnnData(np.vstack([sc_expr.todense(), sp_expr]))
+    adata.obs['batch'] = ["a"] * sc_expr.shape[0] + ['b'] * sp_expr.shape[0]
+    sc.pp.pca(adata)
+    sc.external.pp.harmony_integrate(adata, 'batch')
+    emb_sc = adata.obsm['X_pca_harmony'][:sc_expr.shape[0], :]
+    emb_sp = adata.obsm['X_pca_harmony'][sc_expr.shape[0]:, :]
+    nn = NearestNeighbors(n_neighbors=K, metric='cosine', n_jobs=20)
+    nn.fit(emb_sp)
+    dists, nbs = nn.kneighbors(emb_sc, K, True)
+    sc_loc = np.expand_dims(softmax(-dists, axis=-1),1) @ loc[nbs]
+    return sc_loc.squeeze()
+
 def expLocImp(
              sc_expr, 
              sp_expr,
@@ -384,9 +400,11 @@ def expLocImp(
              lr=1e-3, weight_decay=1e-2, n_epochs=2000,
              device=None,
              seed=None):
-
+    
+    sc_loc = projection(sc_expr, sp_expr, loc, K=3)
     sp_expr = tensify(sp_expr, device)
     loc     = tensify(loc, device)
+    sc_loc     = tensify(sc_loc, device)
     sc_expr = tensify(sc_expr, device, is_dense= not sparse.issparse(sc_expr))
 
     model = LocImp(
@@ -395,6 +413,7 @@ def expLocImp(
             sp_expr=sp_expr,
             sp_locs=loc,
             sc_expr=sc_expr,
+            sc_locs = sc_loc,
             K=n_neighbors,
             l=l_kernel,
             method=autocorr_method,
