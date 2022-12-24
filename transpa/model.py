@@ -213,6 +213,7 @@ class LocImp(nn.Module):
                  l: float=2,
                  method: str=CANO_NAME_MORANSI,
                  dim_hid: int=128,
+                 wt_genes: bool=True,
                  seed: int=None,
                  device: torch.device=None
         ):
@@ -254,10 +255,23 @@ class LocImp(nn.Module):
         if not method in {CANO_NAME_MORANSI, CANO_NAME_GEARYSC}:
             raise Exception("Unimplemented autocorrelation method!")
         self.method = method
+        self.gene_weights = 1
         with torch.no_grad():
             self.truth_stats = self.cal_spa_stats(sp_expr, sp_locs)
+            if wt_genes:
+                I = self.truth_stats.cpu().numpy().flatten()
+                counts, segs = np.histogram(I, bins=50)
+                weights_dict = [1/count if count else count for count in counts] 
+                weights = np.zeros(len(I)) - 1
+                left = segs[0]
+                for ith, right in enumerate(segs[1:]):
+                    sel = (left <= I) & ( I <= right)
+                    weights[sel] = weights_dict[ith]
+                    left = right
+                self.gene_weights = torch.FloatTensor(weights).to(device)
+
             # print(self.truth_stats)
-        self.mse = nn.MSELoss()
+        self.mse = nn.MSELoss(reduction=None)
 
     def _init_sc_locs(self, sc_expr, sp_expr, sp_locs, K=2):
         with torch.no_grad():
@@ -390,7 +404,7 @@ class LocImp(nn.Module):
         # if torch.isnan(spa_stats).any():
         #     print(torch.isnan(spa_stats).sum().item())
         l2norm_square  = torch.square(self.offset).sum() # torch.sum(torch.norm(self.offset, dim=1, p=2)**2) 
-        return self.mse(self.truth_stats, spa_stats)  #+  0.01 * l2norm_square #  + loss1 + loss2 #+ wt_lstr_loss * lstr_loss # 
+        return torch.mean(self.mse(self.truth_stats, spa_stats) * self.gene_weights)  #+  0.01 * l2norm_square #  + loss1 + loss2 #+ wt_lstr_loss * lstr_loss # 
 
 
 class LinTranslator(nn.Module):
