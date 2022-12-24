@@ -380,7 +380,7 @@ def projection(sc_expr, sp_expr, loc, K=3):
     adata = sc.AnnData(np.vstack([sc_expr.todense(), sp_expr]))
     adata.obs['batch'] = ["a"] * sc_expr.shape[0] + ['b'] * sp_expr.shape[0]
     sc.pp.pca(adata)
-    sc.external.pp.harmony_integrate(adata, 'batch')
+    sc.external.pp.harmony_integrate(adata, 'batch', basis="X_pca")
     emb_sc = adata.obsm['X_pca_harmony'][:sc_expr.shape[0], :]
     emb_sp = adata.obsm['X_pca_harmony'][sc_expr.shape[0]:, :]
     nn = NearestNeighbors(n_neighbors=K, metric='cosine', n_jobs=20)
@@ -436,7 +436,7 @@ def expLocImp(
 
     with torch.no_grad():
         sc_locs = model(loc).cpu().numpy()
-        print(model.cal_spa_stats(model.sc_expr, model(model.sp_locs)).cpu().numpy())
+        # print(model.cal_spa_stats(model.sc_expr, model(model.sp_locs)).cpu().numpy())
     return sc_locs
 
 

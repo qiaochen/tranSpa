@@ -256,7 +256,7 @@ class LocImp(nn.Module):
         self.method = method
         with torch.no_grad():
             self.truth_stats = self.cal_spa_stats(sp_expr, sp_locs)
-            print(self.truth_stats)
+            # print(self.truth_stats)
         self.mse = nn.MSELoss()
 
     def _init_sc_locs(self, sc_expr, sp_expr, sp_locs, K=2):
@@ -390,7 +390,7 @@ class LocImp(nn.Module):
         # if torch.isnan(spa_stats).any():
         #     print(torch.isnan(spa_stats).sum().item())
         l2norm_square  = torch.square(self.offset).sum() # torch.sum(torch.norm(self.offset, dim=1, p=2)**2) 
-        return self.mse(self.truth_stats, spa_stats) # + l2norm_square #  + loss1 + loss2 #+ wt_lstr_loss * lstr_loss # 
+        return self.mse(self.truth_stats, spa_stats)  #+  0.01 * l2norm_square #  + loss1 + loss2 #+ wt_lstr_loss * lstr_loss # 
 
 
 class LinTranslator(nn.Module):
