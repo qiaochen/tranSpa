@@ -271,7 +271,7 @@ class LocImp(nn.Module):
                 self.gene_weights = torch.FloatTensor(weights).to(device)
 
             # print(self.truth_stats)
-        self.mse = nn.MSELoss(reduction=None)
+        self.mse = nn.MSELoss(reduction='none')
 
     def _init_sc_locs(self, sc_expr, sp_expr, sp_locs, K=2):
         with torch.no_grad():
