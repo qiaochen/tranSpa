@@ -265,7 +265,6 @@ def fit_transImp(
         
     X = df_ref[train_gene].values
     Y = df_tgt[train_gene].values
-
     # is class by gene
     Y = tensify(Y, device)
     if signature_mode == 'cluster':
