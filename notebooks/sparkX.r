@@ -1,7 +1,7 @@
 args = commandArgs(trailingOnly=TRUE)
 
 library(SPARK)
-loc_path <- '../../output/locations/melanoma.csv'
+loc_path <- sprintf("../../output/locations/%s.csv", args[1])
 
 cal_sparkX <- function(in_path, out_path) {
     df <- t(subset(read.csv(in_path), select = -c(X)))
