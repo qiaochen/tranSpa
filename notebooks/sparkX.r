@@ -1,3 +1,4 @@
+# D58leuFR
 args = commandArgs(trailingOnly=TRUE)
 
 library(SPARK)
@@ -12,9 +13,10 @@ cal_sparkX <- function(in_path, out_path) {
 }
 
 # in_prefix <- "../../output/melanomaext_singlecell_"
-in_prefix <- sprintf("../../output/%sext_singlecell_", args[1])
+in_prefix <- sprintf("../../output/%s_%s_", args[1], args[1])
 
-methods <- c("transImpute", "transImpSpa", "transImpCls", "transImpClsSpa", "spaGE", "stPlus", "Tangram", "truth")
+# methods <- c("transImpute", "transImpSpa", "transImpCls", "transImpClsSpa", "spaGE", "stPlus", "Tangram", "truth")
+methods <- c('truth', 'stPlus', 'spaGE', 'Tangram', 'TransImp', 'TransImpSpa', 'TransImpCls', 'TransImpClsSpa')
 for (mt in methods){
     print(mt)
     in_path <- paste0(in_prefix, mt, '.csv')
