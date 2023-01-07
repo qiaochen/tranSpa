@@ -55,6 +55,7 @@ def SpaGE(Spatial_data,RNA_data,n_pv,genes_to_predict=None):
         
     RNA_data_scaled = pd.DataFrame(data=st.zscore(RNA_data,axis=0),
                                    index = RNA_data.index,columns=RNA_data.columns)
+    RNA_data_scaled.fillna(0, inplace=True)
     Spatial_data_scaled = pd.DataFrame(data=st.zscore(Spatial_data,axis=0),
                                    index = Spatial_data.index,columns=Spatial_data.columns)
     Common_data = RNA_data_scaled[np.intersect1d(Spatial_data_scaled.columns,RNA_data_scaled.columns)]
@@ -68,7 +69,7 @@ def SpaGE(Spatial_data,RNA_data,n_pv,genes_to_predict=None):
             dim_reduction = 'pca',
             dim_reduction_target = 'pca'
     )
-    
+        
     pv_Spatial_RNA.fit(Common_data,Spatial_data_scaled[Common_data.columns])
     
     S = pv_Spatial_RNA.source_components_.T
