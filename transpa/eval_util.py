@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 
 from scipy import stats
+from scipy.spatial.distance import cosine
 from sklearn.metrics import mean_squared_error
 
 
@@ -255,7 +256,7 @@ class CalculateMeteics:
         self.accuracy = result_all
         return result_all
 
-def calc_corr(spatial_df, pred_res, test_gene, is_pearsonr=False):
+def calc_corr(spatial_df, pred_res, test_gene, is_pearsonr=False, use_cosine=True):
     """
     spatial_df: original spatial data (cell by gene dataframe)
     pred_res: predicted results (cell by gene dataframe)
@@ -265,8 +266,10 @@ def calc_corr(spatial_df, pred_res, test_gene, is_pearsonr=False):
     for gene in test_gene:
         if is_pearsonr:
             correlation.append(stats.pearsonr(spatial_df[gene], pred_res[gene])[0])
-        else:
+        elif not use_cosine:
             correlation.append(stats.spearmanr(spatial_df[gene], pred_res[gene])[0])
+        else:
+            correlation.append(1-cosine(spatial_df[gene], pred_res[gene]))
         
     return correlation
 
