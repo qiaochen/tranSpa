@@ -10,7 +10,7 @@ pip install .
 ```
 
 ## Data
-Data used and generated in the notebooks can be downloaded from [Zenodo](https://zenodo.org/record/7347656#.Y32dzXZByUk)
+Data used and generated in the notebooks can be downloaded from [Zenodo](https://zenodo.org/record/7556184#.Y8tfmXZBxD8)
 To run the notebooks, please extract the root folders as sibling folders to `tranSpa`, which should be `../data` and `../output` relative to the `README.md` file
 
 
