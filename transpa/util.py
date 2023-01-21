@@ -20,15 +20,16 @@ def compute_autocorr(spa_adata, df):
     imputed_adata.X = df[imputed_adata.var_names].values
     sq.gr.spatial_autocorr(
         imputed_adata,
+        genes=imputed_adata.var_names,
         n_jobs=10,
         mode='moran'
     )
-    sq.gr.spatial_autocorr(
-        imputed_adata,
-        n_jobs=10,
-        mode='geary',
-    )    
-    imputed_adata.var['sparkx'] = spark_stat(imputed_adata.obsm['spatial'], imputed_adata.X)
+    # sq.gr.spatial_autocorr(
+    #     imputed_adata,
+    #     n_jobs=10,
+    #     mode='geary',
+    # )    
+    # imputed_adata.var['sparkx'] = spark_stat(imputed_adata.obsm['spatial'], imputed_adata.X)
     return imputed_adata
 
 def leiden_cluster(adata, normalize=True):
@@ -265,7 +266,6 @@ def fit_transImp(
         
     X = df_ref[train_gene].values
     Y = df_tgt[train_gene].values
-
     # is class by gene
     Y = tensify(Y, device)
     if signature_mode == 'cluster':
