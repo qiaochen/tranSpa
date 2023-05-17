@@ -319,6 +319,7 @@ def fit_transImp(
         test_X = tensify(test_X, device)
     else:
         test_X = tensify(df_ref[test_gene].values, device)
+
     return model, test_X
 
 def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=None,
@@ -332,6 +333,7 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
              wt_l1norm=None,
              wt_l2norm=None,
              locations=None,
+             n_simulation=None,
              device=None,
              seed=None):
     model, test_X = fit_transImp(
@@ -355,7 +357,40 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
     with torch.no_grad():
         model.eval()
         preds = model.predict(test_X)
+        if not n_simulation is None and not classes is None:
+            sim_res = estimate_uncertainty(model, test_X, classes, n_simulations=n_simulation)
+            return preds, sim_res
     return preds
+
+def estimate_uncertainty(model, test_X, classes, n_simulations=100):
+    sim_res = []
+    classes = np.array(classes)
+    for i in range(n_simulations):
+        sim_test_X = torch.empty_like(test_X)
+        for cls in np.unique(classes):
+            cls_indices = np.argwhere(classes == cls).flatten()
+            sim_indices = np.random.choice(cls_indices, cls_indices.shape[0], replace=True)
+            sim_test_X[cls_indices] = test_X[sim_indices]
+        preds = model.predict(sim_test_X)
+        sim_res.append(preds)
+    return sim_res
+
+def estimate_uncertainty_local(model, test_X, classes, n_simulations=100):
+    sim_res = {}
+    classes = np.array(classes)
+                  
+    for cls in np.unique(classes):
+        res = []
+        for i in range(n_simulations):
+            sim_test_X = test_X.clone().detach()
+            cls_indices = np.argwhere(classes == cls).flatten()
+            sim_indices = np.random.choice(cls_indices, cls_indices.shape[0], replace=True)
+            sim_test_X[cls_indices] = test_X[sim_indices]
+            preds = model.predict(sim_test_X)
+            res.append(preds)
+        sim_res[cls] = res
+    return sim_res    
+
 
 
 def expVeloImp(df_ref, df_tgt, S, U, V, train_gene, test_gene, classes=None, ct_list=None,
