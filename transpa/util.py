@@ -3,12 +3,18 @@ import pandas as pd
 import torch
 import scanpy as sc
 
+
 from torch import nn
 import squidpy as sq
 from scipy import sparse
+
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import rbf_kernel
-
+from torchmetrics.functional.regression import cosine_similarity
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression, Ridge
+from scipy.stats import variation 
+from torchmetrics import SpearmanCorrCoef, PearsonCorrCoef, ConcordanceCorrCoef
 from tqdm import tqdm
 
 from .model import TransDeconv, TransImp, SpaAutoCorr, SparkX, SpaReg
@@ -320,7 +326,7 @@ def fit_transImp(
     else:
         test_X = tensify(df_ref[test_gene].values, device)
 
-    return model, test_X
+    return model, X, Y, test_X
 
 def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=None,
              autocorr_method='moranI', signature_mode='cluster',
@@ -336,60 +342,107 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
              n_simulation=None,
              device=None,
              seed=None):
-    model, test_X = fit_transImp(
-                            df_ref, df_tgt,
-                            train_gene, test_gene,
-                            lr, weight_decay, n_epochs,
-                            classes,
-                            ct_list,
-                            autocorr_method, 
-                            mapping_mode,
-                            mapping_lowdim,
-                            spa_adj,
-                            clip_max=clip_max,
-                            signature_mode=signature_mode,
-                            wt_spa=wt_spa,
-                            wt_l1norm=wt_l1norm,
-                            wt_l2norm=wt_l2norm,
-                            locations=locations,
-                            device=device,
-                            seed=seed) 
+    model, train_X, train_y, test_X = fit_transImp(
+                                            df_ref, df_tgt,
+                                            train_gene, test_gene,
+                                            lr, weight_decay, n_epochs,
+                                            classes,
+                                            ct_list,
+                                            autocorr_method, 
+                                            mapping_mode,
+                                            mapping_lowdim,
+                                            spa_adj,
+                                            # n_simulation=n_simulation,
+                                            clip_max=clip_max,
+                                            signature_mode=signature_mode,
+                                            wt_spa=wt_spa,
+                                            wt_l1norm=wt_l1norm,
+                                            wt_l2norm=wt_l2norm,
+                                            locations=locations,
+                                            device=device,
+                                            seed=seed) 
     with torch.no_grad():
         model.eval()
         preds = model.predict(test_X)
         if not n_simulation is None and not classes is None:
-            sim_res = estimate_uncertainty(model, test_X, classes, n_simulations=n_simulation)
-            return preds, sim_res
+            X = torch.cat([train_X, test_X], dim=1)
+            y = model(X)
+            sim_res_rd = estimate_uncertainty_random(model,  X, classes, n_simulations=n_simulation)
+            sim_res_lc = estimate_uncertainty_local(model,  X, classes, n_simulations=n_simulation)
+            # sim_res = estimate_uncertainty_local(model, test_X, classes, n_simulations=n_simulation)
+            # train_score = cosine_similarity(model(train_X).t(), train_y.t(), 'none').cpu().numpy()  
+                        
+            # train_score_var = np.var(np.array([SpearmanCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
+            # train_score_var = np.var(np.array([ConcordanceCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
+            # train_score_var = np.var(np.array([PearsonCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
+            train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_rd]), axis=0)
+            train_score_hat, test_score_hat = infer_test_performance(np.hstack([
+                                                                                np.median(np.var(np.array(sim_res_rd), axis=0),axis=0).reshape(-1, 1),
+                                                                                np.median(np.var(np.array(sim_res_lc), axis=0),axis=0).reshape(-1, 1),
+                                                                                torch.var(X, dim=0).view(-1, 1).cpu().numpy(),
+                                                                                torch.mean(X, dim=0).view(-1, 1).cpu().numpy(),
+                                                                                variation(X.cpu().numpy(), axis=0).reshape(-1, 1),
+                                                                                (X == 0).float().mean(dim=0).view(-1, 1).cpu().numpy(),
+                                                                                torch.var(y, dim=0).view(-1, 1).cpu().numpy(),
+                                                                                torch.mean(y, dim=0).view(-1, 1).cpu().numpy(),
+                                                                                variation(y.cpu().numpy(), axis=0).reshape(-1, 1),
+                                                                                ]), 
+                                                                     train_score_var)
+            return [preds, sim_res_lc, train_score_var, train_score_hat, test_score_hat]
     return preds
 
-def estimate_uncertainty(model, test_X, classes, n_simulations=100):
+def infer_test_performance(features, train_y):
+    train_end = train_y.shape[0]
+    # model = RandomForestRegressor(max_depth=1)
+    # sel = ~np.isnan(train_y)
+    model = LinearRegression(n_jobs=10)
+    model = model.fit(features[:train_end], train_y)
+    preds = model.predict(features)
+    return preds[:train_end], preds[train_end:]
+
+
+def estimate_uncertainty_local(model, X, classes, n_simulations=100):
+    st0 = np.random.get_state()
+    np.random.seed()
     sim_res = []
     classes = np.array(classes)
     for i in range(n_simulations):
-        sim_test_X = torch.empty_like(test_X)
+        sim_X = torch.empty_like(X)
         for cls in np.unique(classes):
             cls_indices = np.argwhere(classes == cls).flatten()
             sim_indices = np.random.choice(cls_indices, cls_indices.shape[0], replace=True)
-            sim_test_X[cls_indices] = test_X[sim_indices]
-        preds = model.predict(sim_test_X)
+            sim_X[cls_indices] = X[sim_indices]
+        preds = model.predict(sim_X)
         sim_res.append(preds)
+    np.random.set_state(st0)    
     return sim_res
 
-def estimate_uncertainty_local(model, test_X, classes, n_simulations=100):
-    sim_res = {}
-    classes = np.array(classes)
+def estimate_uncertainty_random(model, X, classes=None, n_simulations=100):
+    st0 = np.random.get_state()
+    np.random.seed()
+    sim_res = []
+    for i in range(n_simulations):
+        sim_X = X[np.random.choice(range(X.shape[0]), X.shape[0], replace=True)]
+        preds = model.predict(sim_X)
+        sim_res.append(preds)
+    np.random.set_state(st0)
+    return sim_res
+
+# def estimate_uncertainty_local(model, test_X, classes, n_simulations=100):
+#     sim_res = {}
+#     classes = np.array(classes)
                   
-    for cls in np.unique(classes):
-        res = []
-        for i in range(n_simulations):
-            sim_test_X = test_X.clone().detach()
-            cls_indices = np.argwhere(classes == cls).flatten()
-            sim_indices = np.random.choice(cls_indices, cls_indices.shape[0], replace=True)
-            sim_test_X[cls_indices] = test_X[sim_indices]
-            preds = model.predict(sim_test_X)
-            res.append(preds)
-        sim_res[cls] = res
-    return sim_res    
+#     for cls in np.unique(classes):
+#         res = []
+#         for i in range(n_simulations):
+#             sim_test_X = test_X.clone().detach()
+#             cls_indices = np.argwhere(classes == cls).flatten()
+#             sim_indices = np.random.choice(cls_indices, cls_indices.shape[0], replace=True)
+#             sim_test_X[cls_indices] = test_X[sim_indices]
+#             preds = model.predict(sim_test_X)
+#             res.append(preds)
+#         sim_res[cls] = res
+#     return sim_res    
 
 
 
