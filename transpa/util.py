@@ -340,6 +340,7 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
              wt_l2norm=None,
              locations=None,
              n_simulation=None,
+             ref_nb_indices=None,
              device=None,
              seed=None):
     model, train_X, train_y, test_X = fit_transImp(
@@ -369,6 +370,7 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
             y = model(X)
             sim_res_rd = estimate_uncertainty_random(model,  X, classes, n_simulations=n_simulation)
             sim_res_lc = estimate_uncertainty_local(model,  X, classes, n_simulations=n_simulation)
+            sim_res_nb = estimate_uncertainty_neighbor(model,  X, ref_nb_indices, n_simulations=n_simulation)
             # sim_res = estimate_uncertainty_local(model, test_X, classes, n_simulations=n_simulation)
             # train_score = cosine_similarity(model(train_X).t(), train_y.t(), 'none').cpu().numpy()  
                         
@@ -390,7 +392,10 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
             
             train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_lc]), axis=0)
             train_quantile_hat, test_quantile_hat = infer_prediction_variance(features, train_score_var)
-            return [preds, sim_res_lc, train_score_var, train_var_hat, test_var_hat, train_quantile_hat, test_quantile_hat]
+
+            train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_nb]), axis=0)
+            train_nb_hat, test_nb_hat = infer_prediction_variance(features, train_score_var)
+            return [preds, sim_res_lc, train_score_var, train_var_hat, test_var_hat, train_quantile_hat, test_quantile_hat, train_nb_hat, test_nb_hat]
     return preds
 
 def infer_performance_quantile(features, train_y, quantile=0.8):
@@ -409,15 +414,30 @@ def infer_performance_quantile(features, train_y, quantile=0.8):
 
 def infer_prediction_variance(features, train_y):
     from sklearn.preprocessing import MinMaxScaler
+    from sklearn.linear_model import BayesianRidge
+    st0 = np.random.get_state()
+    np.random.seed()
     train_end = train_y.shape[0]
     features = MinMaxScaler().fit_transform(features)
-    # model = RandomForestRegressor(max_depth=1)
+    # model = RandomForestRegressor(max_depth=5)
     # sel = ~np.isnan(train_y)
     model = LinearRegression(n_jobs=10)
+    # model = BayesianRidge()
     model = model.fit(features[:train_end], train_y)
     preds = model.predict(features)
+    np.random.set_state(st0)    
     return preds[:train_end], preds[train_end:]
 
+def estimate_uncertainty_neighbor(model, X, ref_nb_indices, n_simulations=100):
+    st0 = np.random.get_state()
+    np.random.seed()
+    sim_res = []
+    for i in range(n_simulations):
+        sim_indices = np.random.choice(range(ref_nb_indices.shape[1]), ref_nb_indices.shape[0], replace=True)
+        preds = model.predict(X[ref_nb_indices[range(ref_nb_indices.shape[0]), sim_indices]])
+        sim_res.append(preds)
+    np.random.set_state(st0)    
+    return sim_res
 
 def estimate_uncertainty_local(model, X, classes, n_simulations=100):
     st0 = np.random.get_state()
