@@ -282,6 +282,7 @@ def fit_transImp(
     else:
         X = tensify(X, device)
     
+    # gene_weights = 1 / (torch.mean((X == 0).float(), dim=0, keepdim=True)  + 1)
     spa_inst = None
     if not locations is None:
         locations = tensify(locations, device)
@@ -378,15 +379,17 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
             # train_score_var = np.var(np.array([ConcordanceCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
             # train_score_var = np.var(np.array([PearsonCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
             train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_rd]), axis=0)
-            features = np.hstack([np.median(np.var(np.array(sim_res_rd), axis=0),axis=0).reshape(-1, 1),
-                                  np.median(np.var(np.array(sim_res_lc), axis=0),axis=0).reshape(-1, 1),
-                                  torch.var(X, dim=0).view(-1, 1).cpu().numpy(),
-                                  torch.mean(X, dim=0).view(-1, 1).cpu().numpy(),
-                                  variation(X.cpu().numpy(), axis=0).reshape(-1, 1),
+            features = np.hstack([
+                                #   np.median(np.var(np.array(sim_res_rd), axis=0),axis=0).reshape(-1, 1),
+                                #   np.median(np.var(np.array(sim_res_lc), axis=0),axis=0).reshape(-1, 1),
+                                #   torch.var(X, dim=0).view(-1, 1).cpu().numpy(),
+                                #   torch.mean(X, dim=0).view(-1, 1).cpu().numpy(),
+                                #   variation(X.cpu().numpy(), axis=0).reshape(-1, 1),
                                   (X == 0).float().mean(dim=0).view(-1, 1).cpu().numpy(),
                                   torch.var(y, dim=0).view(-1, 1).cpu().numpy(),
                                   torch.mean(y, dim=0).view(-1, 1).cpu().numpy(),
-                                  variation(y.cpu().numpy(), axis=0).reshape(-1, 1)])
+                                #   variation(y.cpu().numpy(), axis=0).reshape(-1, 1)
+                                  ])
             train_var_hat, test_var_hat = infer_prediction_variance(features,
                                                                      train_score_var)
             
@@ -414,15 +417,17 @@ def infer_performance_quantile(features, train_y, quantile=0.8):
 
 def infer_prediction_variance(features, train_y):
     from sklearn.preprocessing import MinMaxScaler
-    from sklearn.linear_model import BayesianRidge
+    from sklearn.linear_model import BayesianRidge, HuberRegressor, QuantileRegressor, TheilSenRegressor
+    from sklearn.svm import LinearSVR
     st0 = np.random.get_state()
     np.random.seed()
     train_end = train_y.shape[0]
     features = MinMaxScaler().fit_transform(features)
-    # model = RandomForestRegressor(max_depth=5)
+    # model = RandomForestRegressor(max_depth=1, n_jobs=10)
     # sel = ~np.isnan(train_y)
     model = LinearRegression(n_jobs=10)
     # model = BayesianRidge()
+    # model = HuberRegressor()
     model = model.fit(features[:train_end], train_y)
     preds = model.predict(features)
     np.random.set_state(st0)    

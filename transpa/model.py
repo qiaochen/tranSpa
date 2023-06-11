@@ -614,6 +614,7 @@ class TransImp(nn.Module):
              wt_l1norm: float=1e-2,
              wt_l2norm: float=1e-2,
              wt_spa:  float=1e-1,
+             gene_weights=1,
              truth_spa_stats: Tensor=None,
              ):
         """Calculate translation loss given ground truths
@@ -636,7 +637,7 @@ class TransImp(nn.Module):
         sel_valid = (norm_Y_hat != 0) & ~torch.isnan(norm_Y_hat) &  ~torch.isinf(norm_Y_hat)
 
         loss1 = (1 - self.cos_by_col(Y_hat[sel_valid], Y[sel_valid])).mean() 
-        loss2 = (1 - self.cos_by_row(Y_hat[sel_valid], Y[sel_valid])).mean()
+        loss2 = ((1 - self.cos_by_row(Y_hat[sel_valid], Y[sel_valid])) * gene_weights).mean()
 
         
         # loss3 = (1 - self.cos_by_col(torch.sum(Y_hat[sel_valid], dim=0, keepdim=True), torch.sum(Y[sel_valid], dim=0, keepdim=True))).mean()
