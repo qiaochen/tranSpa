@@ -371,35 +371,61 @@ def expTransImp(df_ref, df_tgt, train_gene, test_gene, classes=None, ct_list=Non
             y = model(X)
             sim_res_rd = estimate_uncertainty_random(model,  X, classes, n_simulations=n_simulation)
             sim_res_lc = estimate_uncertainty_local(model,  X, classes, n_simulations=n_simulation)
-            sim_res_nb = estimate_uncertainty_neighbor(model,  X, ref_nb_indices, n_simulations=n_simulation)
+            # sim_res_nb = estimate_uncertainty_neighbor(model,  X, ref_nb_indices, n_simulations=n_simulation)
             # sim_res = estimate_uncertainty_local(model, test_X, classes, n_simulations=n_simulation)
             # train_score = cosine_similarity(model(train_X).t(), train_y.t(), 'none').cpu().numpy()  
-                        
+            # ref_r2_scores = 1 - cross_predict_r2(train_X.cpu().numpy(), test_X.cpu().numpy())
+            # pred_r2_scores = 1 - cross_predict_r2(y[:, :train_X.shape[1]].cpu().numpy(), y[:, train_X.shape[1]:].cpu().numpy())
             # train_score_var = np.var(np.array([SpearmanCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
             # train_score_var = np.var(np.array([ConcordanceCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
             # train_score_var = np.var(np.array([PearsonCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
             train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_rd]), axis=0)
+            # train_score_var = np.log1p(train_score_var)
             features = np.hstack([
-                                #   np.median(np.var(np.array(sim_res_rd), axis=0),axis=0).reshape(-1, 1),
-                                #   np.median(np.var(np.array(sim_res_lc), axis=0),axis=0).reshape(-1, 1),
-                                #   torch.var(X, dim=0).view(-1, 1).cpu().numpy(),
-                                #   torch.mean(X, dim=0).view(-1, 1).cpu().numpy(),
-                                #   variation(X.cpu().numpy(), axis=0).reshape(-1, 1),
-                                  (X == 0).float().mean(dim=0).view(-1, 1).cpu().numpy(),
-                                  torch.var(y, dim=0).view(-1, 1).cpu().numpy(),
-                                  torch.mean(y, dim=0).view(-1, 1).cpu().numpy(),
-                                #   variation(y.cpu().numpy(), axis=0).reshape(-1, 1)
-                                  ])
+                                (X == 0).float().mean(dim=0).view(-1, 1).cpu().numpy(),
+                                torch.var(y, dim=0).view(-1, 1).cpu().numpy(),
+                                torch.mean(y, dim=0).view(-1, 1).cpu().numpy(),
+                                # featurize_predictability(X.t().cpu().numpy(), y.sum(dim=0).view(-1, 1).cpu().numpy())
+                                ])
             train_var_hat, test_var_hat = infer_prediction_variance(features,
                                                                      train_score_var)
-            
+            # test_var_hat = pred_r2_scores
+                        
             train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_lc]), axis=0)
-            train_quantile_hat, test_quantile_hat = infer_prediction_variance(features, train_score_var)
+            # train_score_var = np.nan_to_num(cosine_similarity(train_y, y[:, :train_X.shape[1]]))
+            # train_score_var = np.log1p(train_score_var)
+            
+            
 
-            train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_nb]), axis=0)
+            train_quantile_hat, test_quantile_hat = infer_prediction_variance(features, train_score_var)
+            _, _, tvalues, pvalues, params, r2 = infer_prediction_variance_statsmodel(features, train_score_var)
+            # test_quantile_hat *= ref_r2_scores # * pred_r2_scores
+            # train_quantile_hat = ref_r2_scores[:train_X.shape[1]] * pred_r2_scores[:train_X.shape[1]] * train_quantile_hat
+            # test_quantile_hat =  ref_r2_scores[train_X.shape[1]:] * pred_r2_scores[train_X.shape[1]:] *  test_quantile_hat
+            # train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_nb]), axis=0)
+            # train_score_var = np.log1p(train_score_var)
             train_nb_hat, test_nb_hat = infer_prediction_variance(features, train_score_var)
-            return [preds, sim_res_lc, train_score_var, train_var_hat, test_var_hat, train_quantile_hat, test_quantile_hat, train_nb_hat, test_nb_hat]
+            return [preds, sim_res_lc, train_score_var, train_var_hat, test_var_hat, train_quantile_hat, test_quantile_hat, train_nb_hat, test_nb_hat, tvalues, pvalues, params, r2]
     return preds
+
+
+def featurize_predictability(X, y):
+    from sklearn.linear_model import LinearRegression
+    lr = LinearRegression(n_jobs=20)
+    lr.fit(X, y)
+    y_hat = lr.predict(X)
+    return np.square(y - y_hat)
+
+def cross_predict_r2(X, y):
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import r2_score
+    rg = LinearRegression(n_jobs=20)
+    rg.fit(X, y)
+    scores = r2_score(y, rg.predict(X), multioutput='raw_values')
+    # print(scores.shape)
+    # print(scores)
+    return scores # .reshape(-1, 1)
+
 
 def infer_performance_quantile(features, train_y, quantile=0.8):
     from sklearn.preprocessing import MinMaxScaler
@@ -414,18 +440,37 @@ def infer_performance_quantile(features, train_y, quantile=0.8):
     preds = model.predict_proba(features)[:, 1]
     return preds[:train_end], preds[train_end:]
 
+def infer_prediction_variance_statsmodel(features, train_y):
+    from sklearn.preprocessing import MinMaxScaler
+    from statsmodels.regression.linear_model import OLS
+    import statsmodels.api as sm
+    st0 = np.random.get_state()
+    np.random.seed()
+    train_end = train_y.shape[0]
+    features = MinMaxScaler().fit_transform(features)
+    # features = sm.add_constant(features)
+    # model = LinearRegression(n_jobs=10)
+    # model = BayesianRidge()
+    # model = HuberRegressor()
+    model = OLS(train_y, features[:train_end])
+    results = model.fit()
+    # model = model.fit(features[:train_end], train_y)
+    preds = results.predict(features)
+    np.random.set_state(st0)    
+    return preds[:train_end], preds[train_end:], results.tvalues, results.pvalues, results.params, results.rsquared
 
 def infer_prediction_variance(features, train_y):
     from sklearn.preprocessing import MinMaxScaler
     from sklearn.linear_model import BayesianRidge, HuberRegressor, QuantileRegressor, TheilSenRegressor
     from sklearn.svm import LinearSVR
+    from statsmodels.regression.linear_model import OLS
     st0 = np.random.get_state()
     np.random.seed()
     train_end = train_y.shape[0]
     features = MinMaxScaler().fit_transform(features)
     # model = RandomForestRegressor(max_depth=1, n_jobs=10)
     # sel = ~np.isnan(train_y)
-    model = LinearRegression(n_jobs=10)
+    model = LinearRegression(n_jobs=10, fit_intercept=False)
     # model = BayesianRidge()
     # model = HuberRegressor()
     model = model.fit(features[:train_end], train_y)
