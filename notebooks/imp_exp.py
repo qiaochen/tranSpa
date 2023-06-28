@@ -82,7 +82,20 @@ def run_transImp(raw_scrna_df, raw_spatial_df, train_gene, test_gene, ct_list, c
                 mapping_mode='lowrank',
                 n_epochs=n_epochs,
                 seed=seed,
-                device=device)  
+                device=device)
+
+def run_transImp_var(raw_scrna_df, raw_spatial_df, train_gene, test_gene, ct_list, classes,spa_adj,  n_epochs=2000, seed=None, device=None):
+    res = expTransImp(
+                df_ref=raw_scrna_df,
+                df_tgt=raw_spatial_df,
+                train_gene=train_gene,
+                test_gene=test_gene,
+                signature_mode='cell',
+                mapping_mode='lowrank',
+                n_epochs=n_epochs,
+                seed=seed,
+                device=device)
+    return
 
 def run_transImpSpa(raw_scrna_df, raw_spatial_df, train_gene, test_gene, ct_list, classes, spa_adj, rna_nb_idx, n_epochs=2000, seed=None, device=None):
     return expTransImp(
