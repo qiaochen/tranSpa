@@ -542,33 +542,75 @@ def expVeloImp(df_ref, df_tgt, S, U, V, train_gene, test_gene, classes=None, ct_
              lr=1e-2, weight_decay=1e-2, n_epochs=1000,
              clip_max=10,
              wt_spa=1.0,
+             n_simulation=None,
              wt_l1norm=None,
              wt_l2norm=None,
              locations=None,
              device=None,
              seed=None):
-    model, test_X = fit_transImp(
-                            df_ref, df_tgt,
-                            train_gene, test_gene,
-                            lr, weight_decay, n_epochs,
-                            classes,
-                            ct_list,
-                            autocorr_method, 
-                            mapping_mode,
-                            mapping_lowdim,
-                            spa_adj,
-                            clip_max=clip_max,
-                            signature_mode=signature_mode,
-                            wt_spa=wt_spa,
-                            wt_l1norm=wt_l1norm,
-                            wt_l2norm=wt_l2norm,
-                            locations=locations,
-                            device=device,
-                            seed=seed) 
+    model, train_X, train_y, test_X = fit_transImp(
+                                            df_ref, df_tgt,
+                                            train_gene, test_gene,
+                                            lr, weight_decay, n_epochs,
+                                            classes,
+                                            ct_list,
+                                            autocorr_method, 
+                                            mapping_mode,
+                                            mapping_lowdim,
+                                            spa_adj,
+                                            # n_simulation=n_simulation,
+                                            clip_max=clip_max,
+                                            signature_mode=signature_mode,
+                                            wt_spa=wt_spa,
+                                            wt_l1norm=wt_l1norm,
+                                            wt_l2norm=wt_l2norm,
+                                            locations=locations,
+                                            device=device,
+                                            seed=seed) 
     with torch.no_grad():
         model.eval()
         _U = model.predict(tensify(U, device, not sparse.issparse(U)))
         _S = model.predict(tensify(S, device, not sparse.issparse(U)))
         _V = model.predict(tensify(V, device, not sparse.issparse(V)) + tensify(S, device, not sparse.issparse(U))) - _S
-        X  = model.predict(test_X)
-    return _S, _U, _V, X
+        _X  = model.predict(test_X)
+        if not n_simulation is None and not classes is None:
+            X = torch.cat([train_X, test_X], dim=1)
+            y = model(X)
+            sim_res_rd = estimate_uncertainty_random(model,  X, classes, n_simulations=n_simulation)
+            sim_res_lc = estimate_uncertainty_local(model,  X, classes, n_simulations=n_simulation)
+            # sim_res_nb = estimate_uncertainty_neighbor(model,  X, ref_nb_indices, n_simulations=n_simulation)
+            # sim_res = estimate_uncertainty_local(model, test_X, classes, n_simulations=n_simulation)
+            # train_score = cosine_similarity(model(train_X).t(), train_y.t(), 'none').cpu().numpy()  
+            # ref_r2_scores = 1 - cross_predict_r2(train_X.cpu().numpy(), test_X.cpu().numpy())
+            # pred_r2_scores = 1 - cross_predict_r2(y[:, :train_X.shape[1]].cpu().numpy(), y[:, train_X.shape[1]:].cpu().numpy())
+            # train_score_var = np.var(np.array([SpearmanCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
+            # train_score_var = np.var(np.array([ConcordanceCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
+            # train_score_var = np.var(np.array([PearsonCorrCoef(num_outputs=train_y.shape[1]).to(device)(tensify(_y[:, :train_X.shape[1]], device), train_y).cpu().numpy() for _y in sim_res_rd]), axis=0)
+            train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_rd]), axis=0)
+            # train_score_var = np.log1p(train_score_var)
+            features = np.hstack([
+                                (X == 0).float().mean(dim=0).view(-1, 1).cpu().numpy(),
+                                torch.var(y, dim=0).view(-1, 1).cpu().numpy(),
+                                torch.mean(y, dim=0).view(-1, 1).cpu().numpy(),
+                                # featurize_predictability(X.t().cpu().numpy(), y.sum(dim=0).view(-1, 1).cpu().numpy())
+                                ])
+            train_var_hat, test_var_hat = infer_prediction_variance(features,
+                                                                     train_score_var)
+            # test_var_hat = pred_r2_scores
+                        
+            train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_lc]), axis=0)
+            # train_score_var = np.nan_to_num(cosine_similarity(train_y, y[:, :train_X.shape[1]]))
+            # train_score_var = np.log1p(train_score_var)
+            
+            
+
+            train_quantile_hat, test_quantile_hat = infer_prediction_variance(features, train_score_var)
+            _, _, tvalues, pvalues, params, r2 = infer_prediction_variance_statsmodel(features, train_score_var)
+            # test_quantile_hat *= ref_r2_scores # * pred_r2_scores
+            # train_quantile_hat = ref_r2_scores[:train_X.shape[1]] * pred_r2_scores[:train_X.shape[1]] * train_quantile_hat
+            # test_quantile_hat =  ref_r2_scores[train_X.shape[1]:] * pred_r2_scores[train_X.shape[1]:] *  test_quantile_hat
+            # train_score_var = np.var(np.array([np.nan_to_num(cosine_similarity(tensify(_y[:, :train_X.shape[1]], device).t(), train_y.t(), 'none').cpu().numpy(), posinf=0, neginf=0) for _y in sim_res_nb]), axis=0)
+            # train_score_var = np.log1p(train_score_var)
+            train_nb_hat, test_nb_hat = infer_prediction_variance(features, train_score_var)
+            return [(_S,_U,_V, _X), sim_res_lc, train_score_var, train_var_hat, test_var_hat, train_quantile_hat, test_quantile_hat, train_nb_hat, test_nb_hat, tvalues, pvalues, params, r2]
+    return _S, _U, _V, _X
