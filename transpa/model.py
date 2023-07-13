@@ -370,10 +370,7 @@ class TransDeconv(nn.Module):
         """
         # X is ? by gene
         preds, weight = self.trans(X.t(), False)
-        # Y_hat = (self.scaler_g * preds.t() + self.bias_g) * self.scaler_s
-        # Y_hat = (torch.exp(self.scaler_g) * preds.t() + self.bias_g ** 2) * torch.exp(self.scaler_s)
         Y_hat = torch.exp(self.scaler_g) * preds.t() * torch.exp(self.scaler_s)
-        # Y_hat = (torch.exp(self.scaler_g) * self.nn_reg(X.t()).t() + self.bias_g**2) * torch.exp(self.scaler_s)
         return Y_hat, weight
 
 
