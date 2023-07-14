@@ -25,6 +25,7 @@ if __name__ == "__main__":
     spa_adata.obs['X'] = merfish_1.Centroid_X.values
     spa_adata.obs['Y'] = merfish_1.Centroid_Y.values
     spa_adata.var_names = merfish_data.columns.values
+    spa_adata.obs['cell_class'] = merfish_1.Cell_class.values
     spa_adata.var_names_make_unique()
     sc.pp.normalize_total(spa_adata)
     sc.pp.log1p(spa_adata)
