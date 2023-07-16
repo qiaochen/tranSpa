@@ -1,7 +1,76 @@
 from sklearn import metrics
 from matplotlib import pyplot as plt
 import numpy as np
+import pandas as pd
 
+def score_MI(dict_adata, methods, type, dataset, genes=None, thred=0.01):
+    if genes is None:
+        genes = dict_adata["truth"].var_names
+    eval_res = []
+    df_moranI_truth = dict_adata["truth"].uns['moranI'].loc[genes].query("I > 0")
+    for method in methods:
+        df_moranI_m = dict_adata[method].uns['moranI'].loc[df_moranI_truth.index.values]
+        sel = (~np.isnan(df_moranI_truth.I.values) ) & (~np.isnan(df_moranI_m.I.values))
+        truth_pval = df_moranI_truth.pval_norm_fdr_bh.values[sel]
+        score = df_moranI_m.I.values[sel]
+        if type == "prec_rec":
+            eval_score = metrics.average_precision_score(truth_pval < thred, score)
+        elif type == "roc":
+            eval_score = metrics.roc_auc_score(truth_pval < thred, score)
+        eval_res.append({"method":method, "score":eval_score,"stats":'MoranI', "metric":type, 'dataset':dataset})
+    return pd.DataFrame(eval_res)
+    
+    
+def score_sparkX(dict_sparkx_adjpvals, methods, type, dataset, genes=None, thred=0.01):
+    df_sparkx_adjpvals = pd.DataFrame(dict_sparkx_adjpvals)
+    if not genes is None:
+        df_sparkx_adjpvals = df_sparkx_adjpvals.loc[genes].copy()
+    eval_res = []
+    for method in methods:
+        sel = (~np.isnan(df_sparkx_adjpvals['truth'].values) ) & (~np.isnan(df_sparkx_adjpvals[method].values))
+        truth_pval = df_sparkx_adjpvals.truth.values[sel]
+        score = -np.log(df_sparkx_adjpvals[method][sel].values + min(np.min(df_sparkx_adjpvals[method][sel].values) * 1e-3, 1e-500))
+        if type == "prec_rec":
+            eval_score = metrics.average_precision_score(truth_pval < thred, score)
+        elif type == "roc":
+            eval_score = metrics.roc_auc_score(truth_pval < thred, score)
+        eval_res.append({"method":method, "score":eval_score, "stats":'SPARKX',"metric":type ,'dataset':dataset})
+    return pd.DataFrame(eval_res)
+    
+def score_SDM(adatas, 
+              methods,
+              type,
+              dataset,
+              genes=None,
+              thred=0.01):
+    if genes is None:
+        genes = adatas["truth"].var_names
+    
+    _genes = set([g.lower() for g in genes])
+    sel = []
+    for pair in adatas['truth'].uns['global_res'].index.values:
+        if np.any([False if g.lower() in _genes else True for g in pair.split('_')]):
+            sel.append(False)
+        else:
+            sel.append(True)
+    
+    eval_res = []
+    for md in methods:
+        truth_res = adatas['truth'].uns['global_res'].loc[(adatas['truth'].uns['global_I'] >= 0 ) & np.array(sel)].copy()
+        shared_pairs = np.intersect1d(truth_res.index, adatas[md].uns['global_res'].index)
+        if len(shared_pairs) < len(truth_res.index):
+            print(f"{md} Fewer pairs than truth: {len(shared_pairs)} vs {len(truth_res.index)}")
+            
+        y = truth_res.loc[shared_pairs].selected.values
+        score =  -np.log(adatas[md].uns['global_res'].loc[shared_pairs].fdr.values + min(np.min(adatas[md].uns['global_res'].loc[shared_pairs].fdr.values)/1000, 1e-500))
+        score[np.isinf(score)] = score[~np.isinf(score)].max()*10
+        
+        if type == "prec_rec":
+            eval_score = metrics.average_precision_score(y, score)
+        elif type == "roc":
+            eval_score = metrics.roc_auc_score(y, score)
+        eval_res.append({"method":md, "score":eval_score, "stats":'SDM', "metric":type, 'dataset':dataset})
+    return pd.DataFrame(eval_res)
 
 def plot_curve_MI(df_corr, 
                  df_I, 
