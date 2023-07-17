@@ -2,6 +2,51 @@ from sklearn import metrics
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
+import pickle
+from sklearn.model_selection import KFold
+from transpa.util import expTransImp
+
+def get_pred_perf_variability(pre_datapath, seed, device):    
+    with open(pre_datapath, 'rb') as infile:
+        spa_adata, scrna_adata, raw_spatial_df, raw_scrna_df, raw_shared_gene = pickle.load(infile)
+    cls_key = 'leiden'
+    classes = scrna_adata.obs[cls_key]
+    ct_list = np.unique(classes)  
+    
+    kf = KFold(n_splits=5, shuffle=True, random_state=0)
+    kf.get_n_splits(raw_shared_gene)
+
+    pred_perf_uncertainty = []
+    test_gene_set = []
+    
+    for idx, (train_ind, test_ind) in enumerate(kf.split(raw_shared_gene)):   
+        train_gene = raw_shared_gene[train_ind]
+        test_gene  = raw_shared_gene[test_ind]
+
+        test_spatial_df = raw_spatial_df[test_gene]
+        spatial_df = raw_spatial_df[train_gene]
+        scrna_df   = raw_scrna_df
+
+        transImpRes = expTransImp(
+                        df_ref=raw_scrna_df,
+                        df_tgt=raw_spatial_df,
+                        train_gene=train_gene,
+                        test_gene=test_gene,
+                        n_simulation=200,
+                        signature_mode='cell',
+                        mapping_mode='lowrank',
+                        classes=classes,
+                        n_epochs=2000,
+                        seed=seed,
+                        device=device
+        )
+        pred_perf_uncertainty.extend(transImpRes[1])
+        test_gene_set.extend(test_gene)
+    df_gene_var = pd.DataFrame(index=test_gene_set)
+    df_gene_var['gene'] = test_gene_set
+    df_gene_var['perf_var'] = pred_perf_uncertainty
+    
+    return df_gene_var
 
 def score_MI(dict_adata, methods, type, dataset, genes=None, thred=0.01):
     if genes is None:
