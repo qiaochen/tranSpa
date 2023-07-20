@@ -425,7 +425,7 @@ def estimate_performance_uncertainty(model,
 
     hat_train_score_var, hat_test_score_var = infer_prediction_variance(features, train_score_var)
     if convert_uncertainty_score:
-        hat_train_score_var, hat_test_score_var = expit(-hat_train_score_var), expit(-hat_test_score_var)
+        hat_train_score_var, hat_test_score_var = expit(hat_train_score_var), expit(hat_test_score_var)
     return hat_train_score_var, hat_test_score_var
     
 def expTransImp(
@@ -449,7 +449,7 @@ def expTransImp(
              wt_l2norm: float=None,
              locations: np.array=None,
              n_simulation: int=None,
-             convert_uncertainty_score: bool=False,
+             convert_uncertainty_score: bool=True,
              device: torch.device=None,
              seed: int=None):
     """Main function for transimp
