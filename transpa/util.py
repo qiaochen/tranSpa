@@ -6,6 +6,7 @@ import squidpy as sq
 import pandas as pd
 
 from scipy import sparse
+from scipy.special import expit
 from torchmetrics.functional.regression import cosine_similarity
 from matplotlib import pyplot as plt
 from sklearn.linear_model import LinearRegression
@@ -396,7 +397,14 @@ def estimate_uncertainty_local(model, X, classes, n_simulations=100):
     np.random.set_state(st0)    
     return sim_res
 
-def estimate_performance_uncertainty(model, train_X, train_y, test_X, classes, n_simulation, device=None):
+def estimate_performance_uncertainty(model, 
+                                     train_X, 
+                                     train_y, 
+                                     test_X, 
+                                     classes, 
+                                     n_simulation, 
+                                     convert_uncertainty_score, 
+                                     device=None):
     X = torch.cat([train_X, test_X], dim=1)
     y = model(X)
     sim_res_lc = estimate_uncertainty_local(model,  X, classes, n_simulations=n_simulation)
@@ -416,6 +424,8 @@ def estimate_performance_uncertainty(model, train_X, train_y, test_X, classes, n
     ])            
 
     hat_train_score_var, hat_test_score_var = infer_prediction_variance(features, train_score_var)
+    if convert_uncertainty_score:
+        hat_train_score_var, hat_test_score_var = expit(-hat_train_score_var), expit(-hat_test_score_var)
     return hat_train_score_var, hat_test_score_var
     
 def expTransImp(
@@ -439,6 +449,7 @@ def expTransImp(
              wt_l2norm: float=None,
              locations: np.array=None,
              n_simulation: int=None,
+             convert_uncertainty_score: bool=False,
              device: torch.device=None,
              seed: int=None):
     """Main function for transimp
@@ -464,6 +475,7 @@ def expTransImp(
         wt_l2norm (float, optional): Defaults to None.
         locations (np.array, optional): Spatial coordinates of the ST dataset. Defaults to None.
         n_simulation (int, optional): Indicater & the number of local bootstraps for performance uncertainty estimation. Defaults to None.
+        convert_uncertainty_score (bool, optional): whether or not to convert uncertainty score to certainty score with $sigmoid(-pred.var.)$, 
         device (torch.device, optional): Defaults to None.
         seed (int, optional): Defaults to None.
 
@@ -492,7 +504,14 @@ def expTransImp(
         model.eval()
         preds = model.predict(test_X)
         if not n_simulation is None and not classes is None:
-            _, hat_test_score_var = estimate_performance_uncertainty(model, train_X, train_y, test_X, classes, n_simulation, device)
+            _, hat_test_score_var = estimate_performance_uncertainty(model, 
+                                                                     train_X, 
+                                                                     train_y, 
+                                                                     test_X, 
+                                                                     classes, 
+                                                                     n_simulation, 
+                                                                     convert_uncertainty_score,
+                                                                     device)
             return preds, hat_test_score_var
     return preds
 
