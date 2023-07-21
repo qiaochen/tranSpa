@@ -1,10 +1,11 @@
-|Docs|
+|Docs| |Build Status|
 
 .. .. |PyPI| image:: https://img.shields.io/pypi/v/transp.svg
 ..     :target: https://pypi.org/project/transpa/
 .. |Docs| image:: https://readthedocs.org/projects/transpa/badge/?version=latest
    :target: https://transpa.readthedocs.io/en/latest/
-
+.. |Build Status| image:: https://api.travis-ci.com/qiaochen/tranSpa.svg?branch=main
+   :target: https://app.travis-ci.com/github/qiaochen/tranSpa
 ====
 Home
 ====
