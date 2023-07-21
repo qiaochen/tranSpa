@@ -1,9 +1,9 @@
 # coding:utf-8
 
 from distutils.core import setup
-
+from transpa.version import __version__
 setup(name='transpa',
-      version='0.1.0',
+      version=__version__,
       description='Translation-based imputation and cell type deconvolution',
       author='Chen Qiao',
       author_email='cqiao@connect.hku.hk',
