@@ -20,6 +20,9 @@ from pathlib import Path
 from sphinx.application import Sphinx
 from sphinx.ext import autosummary
 from urllib.request import urlretrieve
+import logging
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).parent
 sys.path.insert(0, f"{HERE.parent.parent}")
