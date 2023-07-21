@@ -30,13 +30,13 @@ TransImp features in two novel functions: \
 
 Please refer to our demo notebooks for details:
 
-* `Different configurations of TransImp applied to SeqFISH dataset dataset.
+* `Different configurations of TransImp applied to SeqFISH dataset dataset`_.
 
 * `Exploration for unprobed genes with SeqFISH ST dataset`_.
 
 .. _Different configurations of TransImp applied to SeqFISH dataset dataset. : seqfish.ipynb
 
-.. _Exploration for unprobed genes with SeqFISH ST dataset: seqfish_unprobed_genes.ipynb
+.. _Exploration for unprobed genes with SeqFISH ST dataset. : seqfish_unprobed_genes.ipynb
 
 
 
