@@ -1,4 +1,4 @@
-|PyPI| |Docs|
+|Docs|
 
 .. .. |PyPI| image:: https://img.shields.io/pypi/v/transp.svg
 ..     :target: https://pypi.org/project/transpa/
@@ -53,7 +53,6 @@ Manuscript of TransImp with more details is available on bioRxiv_ now and is cur
    :maxdepth: 1
    :hidden:
    
-   index
    install
    api
    release
