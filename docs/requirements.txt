@@ -8,3 +8,4 @@ nbsphinx>=0.8.7
 nbsphinx-link>=1.3.0
 sphinx-rtd-theme
 sphinx-gallery>=0.9.0
+sphinx_autodoc_typehints
