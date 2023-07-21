@@ -1,12 +1,12 @@
 Installation
 ============
 
-.. TransImp is available through `PyPI <https://pypi.org/project/tranSpa/>`_.
-.. To install, type the following command line and add ``-U`` for updates:
+TransImp is available through `PyPI <https://pypi.org/project/transpa/>`_.
+To install, type the following command line and add ``-U`` for updates:
 
-.. .. code-block:: bash
+.. code-block:: bash
 
-..    pip install -U transpa
+   pip install -U transpa
 
 Dependent packages can be installed seperatedly with `requirements.txt`:
 
