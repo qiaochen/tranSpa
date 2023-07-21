@@ -3,7 +3,7 @@
 from distutils.core import setup
 
 setup(name='transpa',
-      version='0.0.1',
+      version='0.1.0',
       description='Translation-based imputation and cell type deconvolution',
       author='Chen Qiao',
       author_email='cqiao@connect.hku.hk',
