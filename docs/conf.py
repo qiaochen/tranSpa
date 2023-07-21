@@ -82,7 +82,7 @@ enable_epub_build = False
 
 def setup(app):
     """TODO."""
-    app.add_css_file("custom.css")
+    app.add_css_file("css/custom.css")
 
 def process_generate_options(app: Sphinx):
     """TODO."""
