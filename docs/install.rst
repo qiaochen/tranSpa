@@ -8,9 +8,15 @@ Installation
 
 ..    pip install -U transpa
 
-Alternatively, you can install from this GitHub repository for latest (often 
-development) version by the following command line:
+Dependent packages can be installed seperatedly with `requirements.txt`:
+
+.. code-block:: bash
+
+   pip install -r requirements.txt
+
+To install the latest package from our github repository, you can use the following command line:
 
 .. code-block:: bash
 
    pip install -U git+https://github.com/qiaochen/tranSpa
+
