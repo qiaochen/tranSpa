@@ -24,7 +24,7 @@ class LinTranslator(nn.Module):
                  seed: int=None,
                  device: torch.device=None
         ):
-        """
+        """Linear translator
 
         Args:
             dim_input (float): dimension of reference gene profile
@@ -130,10 +130,20 @@ class SpaReg(SpaStats):
 class SpaAutoCorr(SpaStats):
 
     def __init__(self,
-                 Y,
+                 Y: Tensor,
                  spa_adj: torch.sparse_coo_tensor,
                  method: str=CANO_NAME_MORANSI,
         ):
+        """Class for Spatial Regularization with Moran'S I
+
+        Args:
+            Y (Tensor): Training ST Matrix
+            spa_adj (torch.sparse_coo_tensor): Spatial adjacency matrix
+            method (str, optional): Spatial Autocorrelation method. Defaults to CANO_NAME_MORANSI.
+
+        Raises:
+            Exception: _description_
+        """
         super().__init__()
         self.spa_adj = spa_adj
         self.adjmat_degrees = torch.sparse.sum(spa_adj, dim=1).to_dense()
@@ -148,17 +158,33 @@ class SpaAutoCorr(SpaStats):
         numerator = torch.sum(centered_expr * torch.sparse.mm(sparse_adj, centered_expr.t()).t(), dim=1)
         return numerator
 
-    def _gearysI_numerator_sparse_adj(self, gene_expr, sparse_adj):
-        # I use a trick from Laplacian Eigenmaps for computing the numerator
-        # \sum_{i,j} w_ij ||z_i - z_j||^2 = 2 * Trace(Z(D - W)Z^T)
-        # To test:
-        # from scipy import sparse
-        # _W = np.abs(np.random.randn(4, 4))
-        # W = _W @ _W.T
-        # W -= np.diag(W.diagonal())
-        # Y = np.random.randn(4, 1)
-        # D = W.sum(axis=1)
-        # np.sum((Y - Y.T)**2 * W), 2 * np.sum(D * Y.flatten() ** 2) - 2 * Y.T @ W @ Y
+    def _gearysI_numerator_sparse_adj(self, 
+                                      gene_expr: Tensor, 
+                                      sparse_adj: torch.sparse_coo_tensor):
+        """_summary_
+        
+        I use a trick from Laplacian Eigenmaps for computing the numerator
+        $\sum_{i,j} w_ij ||z_i - z_j||^2 = 2 * Trace(Z(D - W)Z^T)$
+        To test:
+        
+        ```
+        from scipy import sparse
+        _W = np.abs(np.random.randn(4, 4))
+        W = _W @ _W.T
+        W -= np.diag(W.diagonal())
+        Y = np.random.randn(4, 1)
+        D = W.sum(axis=1)
+        np.sum((Y - Y.T)**2 * W), 2 * np.sum(D * Y.flatten() ** 2) - 2 * Y.T @ W @ Y
+        ```
+        
+        Args:
+            gene_expr (Tensor): Expression matrix
+            sparse_adj (SparseTensor): Sparse spatial adjacency matrix
+
+        Returns:
+            Tensor: numerator of spatial autocorrelation value
+        """
+        
         degrees = self.adjmat_degrees
         # Trace(ZDZ^T), since z_i is 1-d vector, we can simplify the computation as follows
         traceZDZ_T = (degrees.view(1,-1) * torch.square(gene_expr)).sum(dim=1)
@@ -167,7 +193,15 @@ class SpaAutoCorr(SpaStats):
         numerator = 2 * (traceZDZ_T - traceZWZ_T)
         return numerator    
 
-    def cal_spa_stats(self, gene_expr):
+    def cal_spa_stats(self, gene_expr: Tensor):
+        """Calculate spatial autocorrelation statistics
+
+        Args:
+            gene_expr (Tensor): Expression matrix
+
+        Returns:
+            Tensor: Spatial autocorrelation statistics
+        """
         method = self.method
         gene_expr = gene_expr.t()
         sparse_adj = self.spa_adj
@@ -178,7 +212,7 @@ class SpaAutoCorr(SpaStats):
         
         if (denominator == 0).any():
             mask = torch.zeros_like(denominator)
-            mask[denominator == 0] = 1e-6
+            mask[denominator == 0] = 1e-8
             denominator = denominator + mask
 
         if method == CANO_NAME_MORANSI:
@@ -190,10 +224,16 @@ class SpaAutoCorr(SpaStats):
             return (N - 1)/ (2*W) * numerator_C / denominator
         return None    
 
-    def loss(self, Y_hat):
+    def loss(self, Y_hat: Tensor):
+        """Calculate spatial regularization loss
+
+        Args:
+            Y_hat (Tensor): predicted ST expression matrix
+
+        Returns:
+            Scalar: mean squared error loss of spatial autocorrelation statistics
+        """
         pred_stats = self.cal_spa_stats(Y_hat)
-        # with no_grad
-        # self.cal_spa_stats(Y_hat[np.random.permutation(Y_hat.shape[0])].detach())
         return self.mse(pred_stats, self.truth_stats)
 
 
@@ -330,10 +370,7 @@ class TransDeconv(nn.Module):
         """
         # X is ? by gene
         preds, weight = self.trans(X.t(), False)
-        # Y_hat = (self.scaler_g * preds.t() + self.bias_g) * self.scaler_s
-        # Y_hat = (torch.exp(self.scaler_g) * preds.t() + self.bias_g ** 2) * torch.exp(self.scaler_s)
         Y_hat = torch.exp(self.scaler_g) * preds.t() * torch.exp(self.scaler_s)
-        # Y_hat = (torch.exp(self.scaler_g) * self.nn_reg(X.t()).t() + self.bias_g**2) * torch.exp(self.scaler_s)
         return Y_hat, weight
 
 
@@ -534,7 +571,7 @@ class TransImp(nn.Module):
                  dim_ref_inputs:  int,
                  dim_hid: int=512,
                  clip_max: float=10,
-                 spa_inst=None,
+                 spa_inst: SpaAutoCorr=None,
                  mapping_mode: str='full',
                  device:    torch.device=None,
                  seed:       int=None
@@ -544,7 +581,7 @@ class TransImp(nn.Module):
         Args:
             dim_tgt_outputs (int): Dimension of ground truth gene profile
             dim_ref_inputs (int): Dimension of reference gene signature
-            dim_hid  (int): dimension of hidden layer. Defaults to 521.
+            dim_hid  (int): dimension of hidden layer. Defaults to 512.
             clip_max (float): clipping threshold for output of first translation. Defaults to 10.
             spa_inst (SpaAutoCorr, optional): Instance of Spatial index class. Default to None.
             mapping_mode (str): "lowrank" or "full". Defaults to full.
@@ -606,14 +643,10 @@ class TransImp(nn.Module):
     def loss(self, 
              X: Tensor, 
              Y: Tensor, 
-            #  cls_abd_sig: Tensor,
-            #  wt_l2_G: float=2.0,
-            #  wt_l2_S: float=2.0,
-            #  wt_l1:   float=5.0,
-            #  wt_abd:  float=2.0,
              wt_l1norm: float=1e-2,
              wt_l2norm: float=1e-2,
              wt_spa:  float=1e-1,
+             gene_weights=1,
              truth_spa_stats: Tensor=None,
              ):
         """Calculate translation loss given ground truths
@@ -629,51 +662,25 @@ class TransImp(nn.Module):
         Returns:
             Tensor: scalar loss
         """
-        # Y_hat = torch.exp(self.scaler_g) * self.trans(X.t()).t() * torch.exp(self.scaler_s)
         Y_hat = self.trans(X.t()).t()
         
         norm_Y_hat = torch.norm(Y_hat, dim=1)
         sel_valid = (norm_Y_hat != 0) & ~torch.isnan(norm_Y_hat) &  ~torch.isinf(norm_Y_hat)
 
         loss1 = (1 - self.cos_by_col(Y_hat[sel_valid], Y[sel_valid])).mean() 
-        loss2 = (1 - self.cos_by_row(Y_hat[sel_valid], Y[sel_valid])).mean()
-
-        
-        # loss3 = (1 - self.cos_by_col(torch.sum(Y_hat[sel_valid], dim=0, keepdim=True), torch.sum(Y[sel_valid], dim=0, keepdim=True))).mean()
-        # loss4 = (1 - self.cos_by_row(torch.sum(Y_hat[sel_valid], dim=1, keepdim=True), torch.sum(Y[sel_valid], dim=1, keepdim=True))).mean()
-        # imp_loss = loss1  + loss2 + loss3 + loss4
+        loss2 = ((1 - self.cos_by_row(Y_hat[sel_valid], Y[sel_valid])) * gene_weights).mean()        
         imp_loss = loss1 + loss2 
-
-        # imp_loss = self.mse(Y_hat, Y)
+        
         if not wt_l1norm is None and wt_l1norm > 0:
             imp_loss = imp_loss + wt_l1norm * self.trans.sparse_reg()
         if not wt_l2norm is None and wt_l2norm > 0:
             imp_loss = imp_loss + wt_l2norm * self.trans.scale_reg()
 
-        # abd_sig_hat = torch.sum(self.trans.trans ** 2, dim=1, keepdim=True)
-        # abd_sig =  cls_abd_sig
-        
-        
-        # l1norm = torch.norm(W, p=1, dim=1).mean()
-        # l2normG = torch.norm(torch.exp(self.scaler_g), p=2)
-        # l2normS = torch.norm(torch.exp(self.scaler_s), p=2)
-        # abd_norm = (1 - self.cos_by_row(torch.log2(abd_sig_hat + 1)/ np.log2(2), 
-        #                               torch.log2(abd_sig + 1)  / np.log2(2))).mean()
-
         loss = imp_loss
-        # if not self.spa_inst is None and not truth_spa_stats is None and wt_spa:
-        #     pred_spa_stats = self.spa_inst.cal_spa_stats(Y_hat)
-        #     spa_reg = self.mse(truth_spa_stats, pred_spa_stats)
-        #     loss = loss + wt_spa * spa_reg    
+        
         if not self.spa_inst is None and wt_spa > 0:
             spa_reg = self.spa_inst.loss(Y_hat)
-            loss = loss + wt_spa * spa_reg
-
-            
-        
-        # loss = imp_loss +  wt_l2_G * l2normG + wt_l2_S * l2normS + \
-        #         wt_l1 * l1norm + wt_abd * abd_norm + wt_spa * spa_reg
-        
+            loss = loss + wt_spa * spa_reg           
         
         return loss, imp_loss.item(), spa_reg.item() if not self.spa_inst is None and wt_spa > 0 else 0
         
@@ -689,8 +696,5 @@ class TransImp(nn.Module):
         """
         # X is ? by gene
         preds = self.trans(X.t())
-        # Y_hat = (self.scaler_g * preds.t() + self.bias_g) * self.scaler_s
-        # Y_hat = (torch.exp(self.scaler_g) * preds.t() + self.bias_g ** 2) * torch.exp(self.scaler_s)
         Y_hat = preds.t()
-        # Y_hat = (torch.exp(self.scaler_g) * self.nn_reg(X.t()).t() + self.bias_g**2) * torch.exp(self.scaler_s)
         return Y_hat
