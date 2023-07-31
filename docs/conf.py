@@ -139,7 +139,7 @@ pygments_style = 'sphinx'
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'alabaster'
+html_theme = 'sphinx_rtd_theme'
 github_repo = 'tranSpa'
 github_nb_repo = 'tranSpa'
 # Add any paths that contain custom static files (such as style sheets) here,
