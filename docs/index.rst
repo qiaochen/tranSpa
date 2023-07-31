@@ -16,15 +16,6 @@ About TransImp
 
 TransImp (Translation-based Spatial Transcriptomics Imputation toolkit) is a computational framework and toolbox for reference-based imputation of spatial transcriptomic dataset.
 
-.. .. image:: x
-..    :width: 900px
-..    :align: center
- 
-
-.. .. image:: https://github.com/StatBiomed/SpatialDM/blob/main/docs/.figs/runtime_aug16-1.png?raw=true
-..    :width: 600px
-..    :align: center
-
 TransImp features in two novel functions: \
  1) Uncertainty score estimation for each imputed gene, allowing the identification of relible predictions; \
  2) Spatial regularisation for explicitily control the degree of spatial pattern preservation for imputation modeling.
@@ -35,9 +26,13 @@ Please refer to our demo notebooks for details:
 
 * `Exploration for unprobed genes with SeqFISH ST dataset`_.
 
+* `Cell type deconvolution with TransDeconv`_.
+
 .. _Different configurations of TransImp applied to SeqFISH dataset dataset: seqfish.ipynb
 
 .. _Exploration for unprobed genes with SeqFISH ST dataset: seqfish_unprobed_genes.ipynb
+
+.. _Cell type deconvolution with TransDeconv: transDeconv.ipynb
 
 
 
@@ -65,3 +60,4 @@ Manuscript of TransImp with more details is available on bioRxiv_ now and is cur
 
    seqfish
    seqfish_unprobed_genes
+   transDeconv

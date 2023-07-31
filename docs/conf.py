@@ -40,6 +40,7 @@ notebooks_url = "https://github.com/qiaochen/tranSpa/raw/main/demo/"
 notebooks = [
     "seqfish.ipynb",
     "seqfish_unprobed_genes.ipynb",
+    "transDeconv.ipynb"
 ]
 for nb in notebooks:
     try:
