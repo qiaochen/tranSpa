@@ -1,7 +1,8 @@
 Main API
 ============
 
-Reference-based imputation:
+Reference-based imputation
+---------------------------
 
 .. code-block:: python
 
@@ -56,7 +57,99 @@ Reference-based imputation:
         list: results
     """
 
-Cell-type deconvoluation:
+TransImpLR:
+
+.. code-block:: python
+
+        expTransImp(
+            df_ref=raw_scrna_df,
+            df_tgt=raw_spatial_df,
+            train_gene=train_gene,
+            test_gene=test_gene,
+            signature_mode='cell',
+            mapping_mode='lowrank',
+            n_epochs=2000,
+            seed=seed,
+            device=device
+         )
+
+TransImpLR (with Uncertainty Score):
+
+.. code-block:: python
+
+        expTransImp(
+            df_ref=raw_scrna_df,
+            df_tgt=raw_spatial_df,
+            train_gene=train_gene,
+            test_gene=test_gene,
+            signature_mode='cell',
+            mapping_mode='lowrank',
+            n_epochs=2000,
+            n_simulation=200,
+            classes=classes,
+            seed=seed,
+            device=device
+         )
+
+TransImpCls:
+
+.. code-block:: python
+
+         expTransImp(
+            df_ref=raw_scrna_df,
+            df_tgt=raw_spatial_df,
+            train_gene=train_gene,
+            test_gene=test_gene,
+            ct_list=ct_list,
+            classes=classes,
+            n_epochs=2000,
+            signature_mode='cluster',
+            mapping_mode='full',
+            seed=seed,
+            device=device
+        )
+
+TransImpSpa:
+
+.. code-block:: python
+
+         expTransImp(
+            df_ref=raw_scrna_df,
+            df_tgt=raw_spatial_df,
+            train_gene=train_gene,
+            test_gene=test_gene,
+            signature_mode='cell',
+            mapping_mode='lowrank',
+            n_epochs=2000,
+            spa_adj=spa_adata.obsp['spatial_connectivities'].tocoo(),
+            seed=seed,
+            device=device
+        )
+
+TransImpClsSpa:
+
+.. code-block:: python
+
+         expTransImp(
+            df_ref=raw_scrna_df,
+            df_tgt=raw_spatial_df,
+            train_gene=train_gene,
+            test_gene=test_gene,
+            ct_list=ct_list,
+            classes=classes,
+            spa_adj=spa_adata.obsp['spatial_connectivities'].tocoo(),
+            signature_mode='cluster',
+            mapping_mode='full',
+            wt_spa=0.1,
+            n_epochs=2000,
+            seed=seed,
+            device=device
+        )
+
+
+
+Cell-type deconvoluation
+---------------------------
 
 .. code-block:: python
 
@@ -88,7 +181,23 @@ Cell-type deconvoluation:
         np.array, np.ndarray: predicted ST cell type, alignment matrix
     """
 
+example:
+
+.. code-block:: python
+
+        expDeconv(
+            df_ref=df_ref,
+            df_tgt=df_tgt,
+            classes=classes,
+            ct_list=ct_list,
+            n_epochs=8000,
+            lr=1e-2,
+            seed=seed,
+            device=device
+        )
+
 ST Velocity estimation
+---------------------------
 
 .. code-block:: python
 
@@ -145,4 +254,24 @@ ST Velocity estimation
     Returns:
         tuple(np.array): ST results
     """
+
+example:
+
+.. code-block:: python
+
+    expVeloImp(
+        df_ref=raw_scrna_df,
+        df_tgt=raw_spatial_df,
+        S=RNA.layers['spliced'],
+        U=RNA.layers['unspliced'],
+        V=RNA.layers['spliced'],
+        train_gene=raw_shared_gene,
+        test_gene=RNA.var_names,
+        signature_mode='cell',
+        mapping_mode='lowrank',
+        classes='celltype_prediction',
+        n_epochs=1000,
+        seed=seed,
+        device=device
+    )
 
