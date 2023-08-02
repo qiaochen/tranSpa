@@ -14,8 +14,8 @@ This tool implements Spatially-Regularized Translation for imputing spatial tran
 
 Three demo notebooks are also available under the [demo](https://github.com/qiaochen/tranSpa/tree/main/demo) folder.
 
-[Different configurations of TransImp applied to SeqFISH dataset dataset](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish.ipynb)
-[Exploration for unprobed genes with SeqFISH ST dataset](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish_unprobed_genes.ipynb)
+- [Different configurations of TransImp applied to SeqFISH dataset dataset](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish.ipynb)
+- [Exploration for unprobed genes with SeqFISH ST dataset](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish_unprobed_genes.ipynb)
 [Cell type deconvolution with TransDeconv](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb)
 
 ## Installation
@@ -35,6 +35,9 @@ pip install .
 ## Data
 Data used and generated in the notebooks can be downloaded from [Zenodo](https://zenodo.org/record/7556184#.Y8tfmXZBxD8)
 To run the notebooks, please extract the root folders as sibling folders to `tranSpa`, which should be `../data` and `../output` relative to the `README.md` file
+
+## Documentation
+Please visit [TransImp website](https://transpa.readthedocs.io/en/latest/) for more details.
 
 
 
