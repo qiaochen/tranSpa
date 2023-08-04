@@ -34,7 +34,7 @@ pip install .
 ```
 
 ## Data
-Data used for running the demo notebooks can be downloaed from [Zenodo](https://zenodo.org/record/8214151)
+Data used for running the demo notebooks can be downloaed from [Zenodo](https://zenodo.org/record/8214466)
 - [seqfish.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish.ipynb) and [seqfish_unprobed_genes.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish_unprobed_genes.ipynb) requires input data in [seqfish.tar.gz](https://zenodo.org/record/8214151/files/seqfish.tar.gz?download=1)
 - [transDeconv.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb) requires input data in [Mouse_brain.tar.gz](https://zenodo.org/record/8214151/files/Mouse_brain.tar.gz?download=1)
 
