@@ -34,8 +34,10 @@ pip install .
 ```
 
 ## Data
-Data used and generated in the notebooks can be downloaded from [Zenodo](https://zenodo.org/record/7556184#.Y8tfmXZBxD8)
-To run the notebooks, please extract the root folders as sibling folders to `tranSpa`, which should be `../data` and `../output` relative to the `README.md` file
+Data used for running the demo notebooks can be downloaed from [Zenodo](https://zenodo.org/record/8214151)
+- [seqfish.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish.ipynb) and [seqfish_unprobed_genes.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish_unprobed_genes.ipynb) requires input data in [seqfish.tar.gz](https://zenodo.org/record/8214151/files/seqfish.tar.gz?download=1)
+- [transDeconv.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb) requires input data in [Mouse_brain.tar.gz](https://zenodo.org/record/8214151/files/Mouse_brain.tar.gz?download=1)
+
 
 ## Documentation
 Please visit [TransImp website](https://transpa.readthedocs.io/en/latest/) for more details.
