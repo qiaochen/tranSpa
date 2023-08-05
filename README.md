@@ -10,7 +10,8 @@
 [link-ci]: https://app.travis-ci.com/github/qiaochen/tranSpa
 
 # TranSpa
-This tool implements Spatially-Regularized Translation for imputing spatial transcriptomics (TransImpSpa), and translation based cell type deconvolution (TransDeconv). Experiments reported in the manuscript are displayed in jupyter notebooks under repo [TranSpaAnalysis](https://github.com/qiaochen/TranSpaAnalysis/tree/main).
+This tool implements Translation-based imputation methods (TransImp) and translation based cell type deconvolution (TransDeconv). Experiments reported in the manuscript are displayed in jupyter notebooks under repo [TranSpaAnalysis](https://github.com/qiaochen/TranSpaAnalysis/tree/main). Report for `TransImp` can be accessed from biorxiv with the latest title 
+>[Reliable imputation of spatial transcriptome with uncertainty estimation and spatial regularization](https://www.biorxiv.org/content/10.1101/2023.01.20.524992v2)
 
 Three demo notebooks are also available under the [demo](https://github.com/qiaochen/tranSpa/tree/main/demo) folder.
 
