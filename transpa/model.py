@@ -21,7 +21,7 @@ class LinTranslator(nn.Module):
     def __init__(self,
                  dim_input: int,
                  dim_output: int,
-                 tau: float=0.5,
+                 tau: float=None,
                  seed: int=None,
                  device: torch.device=None
         ):
@@ -46,6 +46,8 @@ class LinTranslator(nn.Module):
         self.trans = nn.Parameter(torch.randn(dim_input, dim_output))
 
     def _get_weight_mtx(self):
+        if self.tau is None:
+            return torch.square(self.trans)
         return torch.softmax(self.trans/self.tau, dim=0)
 
     def forward(self, input: Tensor, 

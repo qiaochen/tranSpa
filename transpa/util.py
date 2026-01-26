@@ -262,6 +262,7 @@ def expDeconv(df_ref: pd.DataFrame,
                                1.0 no effect,
                                < 1.0, the smaller the sharper the softmaxed distribution becomes
                                > 1.0, the larger the more even the softmaxed distribution becomes
+                               None: turn-off, use the old method
         n_epochs (int, optional): Number of epochs for fitting. Defaults to 1000.
         n_top_genes (int, optional): Number of top variable genes. Defaults to 2000.
         wt_spa (float, optional): Weight of spatial regularization. Defaults to 1.0.
