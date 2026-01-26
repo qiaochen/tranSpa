@@ -191,6 +191,7 @@ def fit_deconv(
             ct_list: np.array,
             n_top_genes: int,
             wt_spa: float,
+            tau: float=0.5,
             autocorr_method: str='moranI',
             spa_adj: sparse.coo_array=None,
             device: torch.device=None,
@@ -214,6 +215,7 @@ def fit_deconv(
                  dim_tgt_outputs=Y.shape[0],
                  n_feats=len(indices),
                  dim_ref_inputs=X.shape[0],
+                 tau = tau,
                  spa_autocorr=None if spa_adj is None else SpaAutoCorr(spa_adj),
                  device=device,
                  seed=seed).to(device)
@@ -239,6 +241,7 @@ def expDeconv(df_ref: pd.DataFrame,
               ct_list: np.array,
               lr: float=1e-3, 
               weight_decay: float=1e-2, 
+              tau: float=1.0,
               n_epochs: int=1000,
               n_top_genes: int=2000,
               wt_spa: float=1.0,
@@ -255,6 +258,10 @@ def expDeconv(df_ref: pd.DataFrame,
         ct_list (np.array): cell type label list
         lr (float, optional): Defaults to 1e-3.
         weight_decay (float, optional): Defaults to 1e-2.
+        tau (float, optional): Defaults to 1.0, softmax temperature for mapping matrix, 
+                               1.0 no effect,
+                               < 1.0, the smaller the sharper the softmaxed distribution becomes
+                               > 1.0, the larger the more even the softmaxed distribution becomes
         n_epochs (int, optional): Number of epochs for fitting. Defaults to 1000.
         n_top_genes (int, optional): Number of top variable genes. Defaults to 2000.
         wt_spa (float, optional): Weight of spatial regularization. Defaults to 1.0.
@@ -275,6 +282,7 @@ def expDeconv(df_ref: pd.DataFrame,
                             classes,
                             ct_list,
                             n_top_genes,
+                            tau=tau,
                             wt_spa=wt_spa,
                             autocorr_method=autocorr_method,
                             spa_adj=spa_adj,                            

@@ -19,8 +19,9 @@ class LinTranslator(nn.Module):
     """
 
     def __init__(self,
-                 dim_input: float,
-                 dim_output: float,
+                 dim_input: int,
+                 dim_output: int,
+                 tau: float=0.5,
                  seed: int=None,
                  device: torch.device=None
         ):
@@ -29,6 +30,7 @@ class LinTranslator(nn.Module):
         Args:
             dim_input (float): dimension of reference gene profile
             dim_output (float): dimension of target gene profile
+            tau: (float): temporature of softmax
             seed (int, optional): random seed. Defaults to None.
             device (torch.device, optional): device of computation. Defaults to None.
         """
@@ -40,11 +42,11 @@ class LinTranslator(nn.Module):
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
-
+        self.tau = tau
         self.trans = nn.Parameter(torch.randn(dim_input, dim_output))
 
     def _get_weight_mtx(self):
-        return torch.square(self.trans)
+        return torch.softmax(self.trans/self.tau, dim=0)
 
     def forward(self, input: Tensor, 
                       only_pred: bool=True):
@@ -245,6 +247,7 @@ class TransDeconv(nn.Module):
                  dim_tgt_outputs: int,
                  dim_ref_inputs:  int,
                  n_feats: int,
+                 tau: float=0.5,
                  spa_autocorr: SpaAutoCorr=None,
                  device:    torch.device=None,
                  seed:       int=None
@@ -275,6 +278,7 @@ class TransDeconv(nn.Module):
         self.mse = nn.MSELoss(reduction='mean')
         self.trans = LinTranslator(dim_ref_inputs, 
                                         dim_tgt_outputs,
+                                        tau=tau,
                                         device=device,
                                         seed=seed)
         self.spa_autocorr = spa_autocorr
