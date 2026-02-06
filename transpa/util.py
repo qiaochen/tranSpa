@@ -241,7 +241,7 @@ def expDeconv(df_ref: pd.DataFrame,
               ct_list: np.array,
               lr: float=1e-3, 
               weight_decay: float=1e-2, 
-              tau: float=1.0,
+              tau: float=None,
               n_epochs: int=1000,
               n_top_genes: int=2000,
               wt_spa: float=1.0,
@@ -258,7 +258,7 @@ def expDeconv(df_ref: pd.DataFrame,
         ct_list (np.array): cell type label list
         lr (float, optional): Defaults to 1e-3.
         weight_decay (float, optional): Defaults to 1e-2.
-        tau (float, optional): Defaults to 1.0, softmax temperature for mapping matrix, 
+        tau (float, optional): Defaults to None, softmax temperature for mapping matrix, 
                                1.0 no effect,
                                < 1.0, the smaller the sharper the softmaxed distribution becomes
                                > 1.0, the larger the more even the softmaxed distribution becomes
