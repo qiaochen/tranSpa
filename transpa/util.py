@@ -322,7 +322,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
               ct_list: np.array=None,
               lr: float=1e-2, 
               weight_decay: float=1e-2, 
-              tau: float=0.05,
+              tau: float=None,
               n_epochs: int=8000,
               n_top_genes: int=2000,
               topk: int=30,
@@ -364,7 +364,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
         weight_decay (float, optional): Defaults to 1e-2.
         tau (float, optional): Softmax temperature for the mapping matrix.
             Smaller values produce sharper (more peaked) cell-type weight
-            distributions per spot. Defaults to 0.05.
+            distributions per spot. Defaults to None.
         n_epochs (int, optional): Number of epochs for fitting. Defaults to 8000.
         n_top_genes (int, optional): Number of top variable genes. Defaults to 2000.
             Ignored when topk is set.
