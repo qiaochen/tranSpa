@@ -14,6 +14,25 @@ from tqdm import tqdm
 
 from .model import TransDeconv, TransImp, SpaAutoCorr, SparkX
 
+
+def is_count_data(X, n_check=1000):
+    """Heuristic to detect whether a matrix contains raw count data.
+
+    Checks a subsample for integer values and a sufficiently wide dynamic
+    range.  Returns ``True`` when the data looks like raw UMI counts and
+    ``False`` when it appears to be normalised / log-transformed.
+    """
+    sample = X[:n_check] if len(X) > n_check else X
+    if sparse.issparse(sample):
+        sample = sample.toarray()
+    sample = np.asarray(sample)
+    vals = sample[sample > 0]
+    if len(vals) == 0:
+        return True
+    is_integer = np.allclose(vals, np.round(vals), atol=1e-3)
+    has_large_range = float(vals.max()) > 50
+    return is_integer and has_large_range
+
 def plot_genes(genes, spa_adata, df_corr=None, is_I=False, n_cols=5, dpi=380, figsize=(20, 20)):
     plt.figure(figsize=figsize, dpi=dpi)
     plt.rcParams.update({"font.size":30, 'axes.titlesize':30})
@@ -125,22 +144,63 @@ def tensify(X,
 
 def signature(classes: np.array, 
               ct_list: np.array, 
-              expr_mtx: np.array):
-    """Generate gene signatures by aggregation expression matrix
-       based on cell types.
+              expr_mtx: np.array,
+              raw_counts: bool=True):
+    """Generate gene signatures by averaging expression per cell type.
+
+    When *raw_counts* is ``True`` (default), each cell is first normalised by
+    its total UMI count before averaging — matching the RCTD approach of
+    computing per-cell-type expression *rates*.  When ``False`` (pre-normalised
+    data), a plain mean is used.
 
     Args:
         classes (np.array): cell type annotation
         ct_list (np.array): available cell type labels
         expr_mtx (np.array): expression matrix
+        raw_counts (bool): whether *expr_mtx* contains raw integer counts.
 
     Returns:
-        tensor, tensor: gene signature, class expression abundence
+        tuple: (gene_signature, class_abundance)
     """
-
-    g_cls_sig = np.vstack([np.sum(expr_mtx[classes == cls], axis=0, keepdims=True) for cls in ct_list])
+    classes = np.asarray(classes)
+    ct_list = np.asarray(ct_list)
+    sigs = []
+    for cls in ct_list:
+        cells = expr_mtx[classes == cls]
+        if raw_counts:
+            numi = cells.sum(axis=1, keepdims=True) + 1e-10
+            sigs.append((cells / numi).mean(axis=0, keepdims=True))
+        else:
+            sigs.append(cells.mean(axis=0, keepdims=True))
+    g_cls_sig = np.vstack(sigs)
     cls_abd_sig = np.array([(classes == cls).sum() for cls in ct_list]).reshape(-1, 1)
     return g_cls_sig, cls_abd_sig
+
+
+def platform_effect_normalize(g_cls_sig, Y, cls_abd_sig):
+    """RCTD-style per-gene platform effect correction.
+
+    Computes a pseudo-bulk prediction from the reference signatures weighted by
+    cell-type frequencies, then returns the per-gene log-ratio that corrects
+    for platform-specific gene detection differences.
+
+    Both reference (predicted) and spatial (observed) sides are compared on the
+    *rate* scale (per-UMI probabilities) so that the library-size component is
+    factored out and handled separately by ``scaler_s``.
+
+    Returns the *unchanged* signatures and the log-ratio vector.
+    """
+    freq = cls_abd_sig.flatten().astype(np.float64)
+    freq = freq / (freq.sum() + 1e-10)
+    predicted_rate = freq @ g_cls_sig
+
+    observed_counts = np.asarray(Y).mean(axis=0)
+    mean_lib_size = np.asarray(Y).sum(axis=1).mean()
+    observed_rate = observed_counts / (mean_lib_size + 1e-10)
+
+    ratio = observed_rate / (predicted_rate + 1e-10)
+    ratio = np.clip(ratio, 0.01, 100.0)
+    return g_cls_sig, np.log(ratio + 1e-10)
 
 
 def select_deconv_genes(df_ref: pd.DataFrame, 
@@ -256,13 +316,14 @@ def fit_deconv(
             spa_adj: sparse.coo_array=None,
             gene_mask: pd.DataFrame=None,
             normalize_sig: bool=False,
+            raw_counts: bool=True,
             device: torch.device=None,
             seed: int=None):
     indices = select_top_variable_genes(df_ref.values, n_top_genes)
     X = df_ref.values[:, indices]
     Y = df_tgt.values[:, indices]
 
-    g_cls_sig, cls_abd_sig = signature(classes, ct_list, X)
+    g_cls_sig, cls_abd_sig = signature(classes, ct_list, X, raw_counts=raw_counts)
 
     if gene_mask is not None:
         selected_genes = df_ref.columns[indices]
@@ -272,6 +333,16 @@ def fit_deconv(
     if normalize_sig:
         row_norms = np.linalg.norm(g_cls_sig, axis=1, keepdims=True)
         g_cls_sig = g_cls_sig / (row_norms + 1e-10)
+
+    g_cls_sig, log_platform_factor = platform_effect_normalize(g_cls_sig, Y, cls_abd_sig)
+
+    scaler_g_init = tensify(log_platform_factor.reshape(1, -1), device)
+
+    if raw_counts:
+        lib_size = Y.sum(axis=1, keepdims=True).astype(np.float64)
+        scaler_s_init = tensify(np.log(lib_size + 1e-10), device)
+    else:
+        scaler_s_init = None
 
     X, Y = tensify(g_cls_sig, device), tensify(Y, device)
     cls_abd_sig = tensify(cls_abd_sig, device)
@@ -285,8 +356,11 @@ def fit_deconv(
                  dim_tgt_outputs=Y.shape[0],
                  n_feats=len(indices),
                  dim_ref_inputs=X.shape[0],
-                 tau = tau,
+                 tau=tau,
                  spa_autocorr=None if spa_adj is None else SpaAutoCorr(spa_adj),
+                 scaler_g_init=scaler_g_init,
+                 scaler_s_init=scaler_s_init,
+                 raw_counts=raw_counts,
                  device=device,
                  seed=seed).to(device)
 
@@ -294,7 +368,8 @@ def fit_deconv(
         with torch.no_grad():
             truth_autocorr = model.spa_autocorr.cal_spa_stats(Y, autocorr_method)
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)        
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
     pbar = tqdm(range(n_epochs))
 
     for ith_epoch in pbar:
@@ -302,6 +377,7 @@ def fit_deconv(
                                   None if spa_adj is None else truth_autocorr,
                                   autocorr_method
                                   )
+        scheduler.step()
         pbar.set_description(f"[LinTrans] Epoch: {ith_epoch+1}/{n_epochs}, {info}")    
 
     return model, X, Y
@@ -325,7 +401,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
               tau: float=None,
               n_epochs: int=8000,
               n_top_genes: int=2000,
-              topk: int=30,
+              topk: int=100,
               wt_spa: float=1.0,
               autocorr_method: str='moranI',
               spa_adj:sparse.coo_array=None,
@@ -333,6 +409,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
               calibrate: float=0.0,
               gene_mask: pd.DataFrame=None,
               normalize_sig: bool=True,
+              raw_counts: bool=None,
               device: torch.device=None,
               seed: int=None):
     """Cell type deconvolution.
@@ -371,7 +448,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
         topk (int, optional): Number of top marker genes per cell type to select
             via Wilcoxon test. When set, performs DE-based gene selection and
             builds a per-type gene mask automatically, ignoring n_top_genes.
-            Defaults to 30.
+            Defaults to 100.
         wt_spa (float, optional): Weight of spatial regularization. Defaults to 1.0.
         autocorr_method (str, optional): Defaults to 'moranI'.
         spa_adj (sparse.coo_array, optional): Spatial adjacency matrix. Defaults to None.
@@ -385,6 +462,8 @@ def expDeconv(adata_ref: sc.AnnData=None,
             Overridden when topk is set. Defaults to None.
         normalize_sig (bool, optional): Whether to L2-normalize cell-type
             signatures. Recommended when using gene_mask. Defaults to True.
+        raw_counts (bool, optional): Whether the input data is raw integer
+            counts. When ``None`` (default), auto-detected via heuristic.
         device (torch.device, optional): Defaults to None.
         seed (int, optional): Defaults to None.
 
@@ -403,6 +482,9 @@ def expDeconv(adata_ref: sc.AnnData=None,
             ct_list = np.unique(classes)
         if spa_adata is None:
             spa_adata = adata_tgt
+
+    if raw_counts is None:
+        raw_counts = is_count_data(df_ref.values if df_ref is not None else df_tgt.values)
 
     if topk is not None and topk > 0:
         df_ref, df_tgt, _topk_mask = select_deconv_genes(
@@ -454,6 +536,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
                             spa_adj=spa_adj,
                             gene_mask=gene_mask,
                             normalize_sig=normalize_sig,
+                            raw_counts=raw_counts,
                             device=device,
                             seed=seed) 
     with torch.no_grad():

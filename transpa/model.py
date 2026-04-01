@@ -4,6 +4,7 @@
 import torch
 import random
 import numpy as np
+import torch.nn.functional as F
 
 from turtle import forward
 from torch import Tensor, nn
@@ -15,7 +16,10 @@ CANO_NAME_GEARYSC = 'gearyC'
 
 
 class LinTranslator(nn.Module):
-    """Linear translator
+    """Linear translator with learnable softmax temperature.
+
+    The weight matrix is always produced via column-wise softmax so that
+    per-spot weights live on the probability simplex during optimisation.
     """
 
     def __init__(self,
@@ -25,16 +29,6 @@ class LinTranslator(nn.Module):
                  seed: int=None,
                  device: torch.device=None
         ):
-        """Linear translator
-
-        Args:
-            dim_input (float): dimension of reference gene profile
-            dim_output (float): dimension of target gene profile
-            tau: (float): temporature of softmax
-            seed (int, optional): random seed. Defaults to None.
-            device (torch.device, optional): device of computation. Defaults to None.
-        """
-
         super().__init__()
         self.seed = seed
         self.device = device
@@ -42,18 +36,16 @@ class LinTranslator(nn.Module):
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
-        self.tau = tau
+        self.log_tau = nn.Parameter(torch.tensor(0.0))
         self.trans = nn.Parameter(torch.randn(dim_input, dim_output))
 
     def _get_weight_mtx(self):
-        if self.tau is None:
-            return torch.square(self.trans)
-        return torch.softmax(self.trans/self.tau, dim=0)
+        tau = F.softplus(self.log_tau) + 0.01
+        return torch.softmax(self.trans / tau, dim=0)
 
     def forward(self, input: Tensor, 
                       only_pred: bool=True):
         """
-
         Args:
             input (Tensor): Reference gene signature
             only_pred (bool, optional): not return weights or return. Defaults to True.
@@ -296,30 +288,43 @@ class TransDeconv(nn.Module):
                  n_feats: int,
                  tau: float=0.5,
                  spa_autocorr: SpaAutoCorr=None,
+                 scaler_g_init: Tensor=None,
+                 scaler_s_init: Tensor=None,
+                 raw_counts: bool=True,
                  device:    torch.device=None,
                  seed:       int=None
                 ):
         """
-
         Args:
             dim_tgt_outputs (int): Dimension of ground truth gene profile
             dim_ref_inputs (int): Dimension of reference gene signature
             n_feats (int): number of genes
             spa_autocorr (SpaAutoCorr, optional): Instance of Spatial index class. Default to None.
+            scaler_g_init (Tensor, optional): Fixed per-gene platform-effect log-scaler [1, n_feats].
+            scaler_s_init (Tensor, optional): Fixed per-spot library-size log-scaler [dim_tgt_outputs, 1].
+            raw_counts (bool): Whether the target data is raw counts (selects loss type).
             device (torch.device, optional): Device of computation. Defaults to None.
             seed (int, optional): Seed number. Defaults to None.
         """
         super().__init__()
         self.device = device
         self.seed = seed
+        self.raw_counts = raw_counts
         if not seed is None:
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
-        
-        self.scaler_g = nn.Parameter(torch.zeros(1, n_feats))
+
+        if scaler_g_init is not None:
+            self.register_buffer('scaler_g', scaler_g_init)
+        else:
+            self.register_buffer('scaler_g', torch.zeros(1, n_feats))
+        if scaler_s_init is not None:
+            self.register_buffer('scaler_s', scaler_s_init)
+        else:
+            self.register_buffer('scaler_s', torch.zeros(dim_tgt_outputs, 1))
+
         self.bias_g = nn.Parameter(torch.zeros(1, n_feats))
-        self.scaler_s = nn.Parameter(torch.zeros(dim_tgt_outputs, 1))
         self.cos_by_col = nn.CosineSimilarity(dim=1)
         self.cos_by_row = nn.CosineSimilarity(dim=0)
         self.mse = nn.MSELoss(reduction='mean')
@@ -361,6 +366,7 @@ class TransDeconv(nn.Module):
              wt_l1:   float=5.0,
              wt_abd:  float=2.0,
              wt_spa:  float=1.0,
+             wt_recon: float=0.01,
              method_autocorr: str=CANO_NAME_MORANSI):
         """Calculate translation loss given ground truths
 
@@ -374,6 +380,7 @@ class TransDeconv(nn.Module):
             wt_l1 (float): weight of l1 regulariztion. Defaults to 5.0.
             wt_abd (float): weight of abundance signature loss. Defaults to 2.0.
             wt_spa (float): weight spatial regularization loss. Defaults to 1.0.
+            wt_recon (float): weight of reconstruction loss. Defaults to 1.0.
             method_autocorr (str): name of spatial autocorrelation methods "moranI" or "gearyC"
 
         Returns:
@@ -390,13 +397,18 @@ class TransDeconv(nn.Module):
         loss4 = (1 - self.cos_by_row(torch.sum(Y_hat[sel_valid], dim=1, keepdim=True), torch.sum(Y[sel_valid], dim=1, keepdim=True))).mean()
         imp_loss = loss1  + loss2 + loss3 + loss4
 
-        abd_sig_hat = torch.sum(self.trans.trans ** 2, dim=1, keepdim=True)
-        abd_sig =  cls_abd_sig
-        
-        W = torch.square(self.trans.trans.t())
+        if self.raw_counts:
+            Y_hat_clamped = torch.clamp(Y_hat[sel_valid], min=1e-8)
+            recon_loss = F.poisson_nll_loss(Y_hat_clamped, Y[sel_valid], log_input=False)
+        else:
+            recon_loss = F.mse_loss(torch.log1p(torch.clamp(Y_hat[sel_valid], min=0)),
+                                    torch.log1p(torch.clamp(Y[sel_valid], min=0)))
+
+        W = self.trans._get_weight_mtx()
         l1norm = torch.norm(W, p=1, dim=1).mean()
-        l2normG = torch.norm(torch.exp(self.scaler_g), p=2)
-        l2normS = torch.norm(torch.exp(self.scaler_s), p=2)
+
+        abd_sig_hat = torch.sum(W, dim=1, keepdim=True)
+        abd_sig = cls_abd_sig
         abd_norm = (1 - self.cos_by_row(torch.log2(abd_sig_hat + 1)/ np.log2(2), 
                                       torch.log2(abd_sig + 1)  / np.log2(2))).mean()
         if (not self.spa_autocorr is None) and (not truth_autocorr is None):
@@ -405,7 +417,7 @@ class TransDeconv(nn.Module):
         else:
             spa_reg = 0
         
-        loss = imp_loss +  wt_l2_G * l2normG + wt_l2_S * l2normS + \
+        loss = imp_loss + wt_recon * recon_loss + \
                 wt_l1 * l1norm + wt_abd * abd_norm + wt_spa * spa_reg
         return loss
         
