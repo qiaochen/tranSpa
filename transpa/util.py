@@ -1,13 +1,14 @@
 import torch
+import torch.nn.functional as F
+import sys
+import os
 
 import numpy as np
 import scanpy as sc
-import squidpy as sq
 import pandas as pd
 
 from scipy import sparse
 from scipy.special import expit
-from torchmetrics.functional.regression import cosine_similarity
 from matplotlib import pyplot as plt
 from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
@@ -65,6 +66,7 @@ def compute_autocorr(spa_adata: sc.AnnData,
     """
     imputed_adata = spa_adata.copy()
     imputed_adata.X = df[imputed_adata.var_names].values
+    import squidpy as sq
     sq.gr.spatial_autocorr(
         imputed_adata,
         genes=imputed_adata.var_names,
@@ -145,22 +147,19 @@ def tensify(X,
 def signature(classes: np.array, 
               ct_list: np.array, 
               expr_mtx: np.array,
-              raw_counts: bool=True):
-    """Generate gene signatures by averaging expression per cell type.
-
-    When *raw_counts* is ``True`` (default), each cell is first normalised by
-    its total UMI count before averaging — matching the RCTD approach of
-    computing per-cell-type expression *rates*.  When ``False`` (pre-normalised
-    data), a plain mean is used.
+              raw_counts: bool=False):
+    """Generate gene signatures by aggregation expression matrix
+       based on cell types.
 
     Args:
         classes (np.array): cell type annotation
         ct_list (np.array): available cell type labels
         expr_mtx (np.array): expression matrix
-        raw_counts (bool): whether *expr_mtx* contains raw integer counts.
+        raw_counts (bool): If True, normalize each cell by total UMI
+            before averaging (rate-based, RCTD-style).
 
     Returns:
-        tuple: (gene_signature, class_abundance)
+        tensor, tensor: gene signature, class expression abundence
     """
     classes = np.asarray(classes)
     ct_list = np.asarray(ct_list)
@@ -171,7 +170,7 @@ def signature(classes: np.array,
             numi = cells.sum(axis=1, keepdims=True) + 1e-10
             sigs.append((cells / numi).mean(axis=0, keepdims=True))
         else:
-            sigs.append(cells.mean(axis=0, keepdims=True))
+            sigs.append(np.sum(cells, axis=0, keepdims=True))
     g_cls_sig = np.vstack(sigs)
     cls_abd_sig = np.array([(classes == cls).sum() for cls in ct_list]).reshape(-1, 1)
     return g_cls_sig, cls_abd_sig
@@ -201,6 +200,69 @@ def platform_effect_normalize(g_cls_sig, Y, cls_abd_sig):
     ratio = observed_rate / (predicted_rate + 1e-10)
     ratio = np.clip(ratio, 0.01, 100.0)
     return g_cls_sig, np.log(ratio + 1e-10)
+
+
+def _fast_rank_genes(X, labels, group_names, topk=30):
+    """Vectorized one-vs-rest t-test for all groups at once.
+
+    Uses sparse indicator matrix multiplication for O(1)-loop group statistics.
+    Returns dict mapping group_name -> list of top-k gene column indices.
+    """
+    from scipy import sparse as _sp
+    if _sp.issparse(X):
+        X = X.toarray()
+    X = np.asarray(X, dtype=np.float32)
+    n_cells, n_genes = X.shape
+
+    unique_labels = np.unique(labels)
+    label_to_int = {l: i for i, l in enumerate(unique_labels)}
+    int_labels = np.array([label_to_int[l] for l in labels], dtype=np.int32)
+    n_groups = len(unique_labels)
+
+    indicator = _sp.csc_matrix(
+        (np.ones(n_cells, dtype=np.float32), (int_labels, np.arange(n_cells))),
+        shape=(n_groups, n_cells))
+
+    group_n = np.asarray(indicator.sum(axis=1)).ravel()
+    group_sum = np.asarray(indicator.dot(X))
+
+    X_sq = X ** 2
+    group_sq_sum = np.asarray(indicator.dot(X_sq))
+    total_sum = group_sum.sum(axis=0)
+    total_sq_sum = group_sq_sum.sum(axis=0)
+    del X_sq
+
+    group_mean = group_sum / np.maximum(group_n[:, None], 1)
+
+    result = {}
+    for gname in group_names:
+        if gname not in label_to_int:
+            result[gname] = []
+            continue
+        gi = label_to_int[gname]
+        n1 = group_n[gi]
+        n2 = n_cells - n1
+        if n1 < 2 or n2 < 1:
+            result[gname] = []
+            continue
+
+        mean1 = group_mean[gi]
+        var1 = group_sq_sum[gi] / n1 - mean1 ** 2
+        var1 = np.maximum(var1, 0)
+
+        rest_sum = total_sum - group_sum[gi]
+        rest_sq = total_sq_sum - group_sq_sum[gi]
+        mean2 = rest_sum / n2
+        var2 = rest_sq / n2 - mean2 ** 2
+        var2 = np.maximum(var2, 0)
+
+        se = np.sqrt(var1 / n1 + var2 / n2 + 1e-30)
+        t_stat = (mean1 - mean2) / se
+
+        top_idx = np.argsort(-t_stat)[:topk]
+        result[gname] = top_idx.tolist()
+
+    return result
 
 
 def select_deconv_genes(df_ref: pd.DataFrame, 
@@ -240,7 +302,6 @@ def select_deconv_genes(df_ref: pd.DataFrame,
     sc.pp.normalize_total(adata)
     sc.pp.log1p(adata)
     sc.tl.rank_genes_groups(adata, groupby='celltype', use_raw=False, method='wilcoxon')
-    adata.X = adata.layers['raw'].copy()
 
     markers_per_ct = {}
     for ct in ct_list:
@@ -262,16 +323,273 @@ def select_deconv_genes(df_ref: pd.DataFrame,
     return df_ref_sel, df_tgt_sel, gene_mask
 
 
+def _gini_coefficient(x):
+    """Compute the Gini coefficient for a 1-D array (gene expression across cells)."""
+    x = np.asarray(x, dtype=np.float64)
+    if x.sum() == 0:
+        return 0.0
+    x = np.sort(x)
+    n = len(x)
+    idx = np.arange(1, n + 1)
+    return (2 * np.sum(idx * x) - (n + 1) * np.sum(x)) / (n * np.sum(x) + 1e-10)
+
+
+def _gini_per_gene(expr_mtx):
+    """Vectorised Gini coefficient for every column (gene) of a matrix."""
+    X = np.asarray(expr_mtx, dtype=np.float64)
+    n = X.shape[0]
+    X_sorted = np.sort(X, axis=0)
+    col_sums = X_sorted.sum(axis=0)
+    idx = np.arange(1, n + 1).reshape(-1, 1)
+    numerator = 2 * (idx * X_sorted).sum(axis=0) - (n + 1) * col_sums
+    gini = numerator / (n * col_sums + 1e-10)
+    gini[col_sums == 0] = 0.0
+    return gini
+
+
+def _rare_type_markers_gini(expr_mtx, gene_names, rare_mask,
+                            topk=30, gini_quantile=0.9,
+                            _precomputed_gini=None):
+    """Select markers for rare cell types using a Gini-index heuristic.
+
+    High-Gini genes are those expressed in only a few cells -- exactly the
+    pattern that discriminates rare populations.  We intersect the top-Gini
+    genes with genes that are upregulated in the rare cells (fold-change
+    filter) to produce a focused marker set.
+
+    Args:
+        expr_mtx: Normalised expression matrix [cells x genes].
+        gene_names: Gene name array aligned with columns of *expr_mtx*.
+        rare_mask: Boolean mask (True for cells of the rare type).
+        topk: Max markers to return.
+        gini_quantile: Quantile threshold on the Gini distribution.
+        _precomputed_gini: Pre-computed Gini scores to avoid recomputation.
+
+    Returns:
+        list[str]: Selected marker gene names.
+    """
+    gini_scores = _precomputed_gini if _precomputed_gini is not None else _gini_per_gene(expr_mtx)
+    gini_thresh = np.quantile(gini_scores, gini_quantile)
+    high_gini = gini_scores >= gini_thresh
+
+    rare_mean = expr_mtx[rare_mask].mean(axis=0) + 1e-10
+    other_mean = expr_mtx[~rare_mask].mean(axis=0) + 1e-10
+    log2fc = np.log2(rare_mean / other_mean)
+
+    upregulated = log2fc > 0.5
+    detected_in_rare = (expr_mtx[rare_mask] > 0).mean(axis=0) > 0.3
+
+    candidate = high_gini & upregulated & detected_in_rare
+    if candidate.sum() == 0:
+        candidate = upregulated & detected_in_rare
+
+    order = np.argsort(-log2fc)
+    selected = [gene_names[i] for i in order if candidate[i]][:topk]
+    if len(selected) < 5:
+        order_fc = np.argsort(-log2fc)
+        for i in order_fc:
+            if gene_names[i] not in selected and upregulated[i]:
+                selected.append(gene_names[i])
+            if len(selected) >= topk:
+                break
+    return selected
+
+
+def select_deconv_genes_v2(df_ref, df_tgt, classes, ct_list, topk=30,
+                           rare_threshold=20):
+    """Abundance-aware marker gene selection (Phase 1).
+
+    For cell types with >= *rare_threshold* cells, uses the standard
+    Wilcoxon rank-sum test.  For rare types (fewer cells), uses a
+    Gini-index + fold-change heuristic that is more robust at small n.
+
+    Args:
+        df_ref, df_tgt, classes, ct_list, topk: Same as select_deconv_genes.
+        rare_threshold: Cell count below which a type is considered rare.
+
+    Returns:
+        Same as select_deconv_genes: (df_ref_sel, df_tgt_sel, gene_mask).
+    """
+    import anndata
+
+    classes = np.asarray(classes)
+    ct_list = np.asarray(ct_list)
+    shared_genes = np.intersect1d(df_ref.columns, df_tgt.columns)
+
+    adata = anndata.AnnData(
+        X=df_ref[shared_genes].values.copy(),
+        obs=pd.DataFrame({'celltype': classes}),
+        var=pd.DataFrame(index=shared_genes),
+    )
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+
+    ct_counts = pd.Series(classes).value_counts()
+    abundant_types = [ct for ct in ct_list if ct_counts.get(ct, 0) >= rare_threshold]
+    rare_types = [ct for ct in ct_list if ct_counts.get(ct, 0) < rare_threshold]
+
+    markers_per_ct = {}
+
+    gene_rank = _fast_rank_genes(adata.X, classes, list(ct_list), topk=topk)
+    for ct in ct_list:
+        idxs = gene_rank.get(ct, [])
+        markers_per_ct[ct] = [shared_genes[i] for i in idxs]
+
+    all_markers = np.unique(np.concatenate(list(markers_per_ct.values())))
+    selected_genes = np.intersect1d(all_markers, shared_genes)
+
+    gene_mask = pd.DataFrame(
+        np.zeros((len(ct_list), len(selected_genes)), dtype=bool),
+        columns=selected_genes, index=ct_list,
+    )
+    for ct in ct_list:
+        gene_mask.loc[ct, gene_mask.columns.isin(markers_per_ct[ct])] = True
+
+    return df_ref[selected_genes], df_tgt[selected_genes], gene_mask
+
+
+def select_spatial_markers(spa_adata, shared_genes, topk=30,
+                           _cached_labels=None):
+    """Extract marker genes from spatial data via Leiden clustering (Phase 2).
+
+    Uses a fast t-test instead of Wilcoxon for speed on spatial data
+    (many clusters x many genes).
+
+    Args:
+        spa_adata: Spatial AnnData.
+        shared_genes: Gene names present in both ref and target.
+        topk: Number of markers per cluster.
+        _cached_labels: Pre-computed Leiden labels to avoid redundant clustering.
+
+    Returns:
+        dict: mapping cluster_id -> list of marker gene names.
+        pd.Series: cluster labels per spot.
+    """
+    if _cached_labels is not None:
+        cluster_labels = _cached_labels
+        cluster_ids = np.unique(cluster_labels.values)
+    else:
+        cluster_labels, cluster_ids = leiden_cluster(spa_adata, normalize=True)
+
+    genes_to_use = np.intersect1d(spa_adata.var_names, shared_genes)
+    spa_cp = spa_adata[:, genes_to_use].copy()
+    sc.pp.normalize_total(spa_cp)
+    sc.pp.log1p(spa_cp)
+    spa_cp.obs['leiden'] = cluster_labels.values
+    cids_str = [str(c) for c in cluster_ids]
+    gene_rank = _fast_rank_genes(spa_cp.X, spa_cp.obs['leiden'].values, cids_str, topk=topk)
+
+    spa_genes = np.asarray(spa_cp.var_names)
+    spa_markers = {}
+    for cid in cluster_ids:
+        idxs = gene_rank.get(str(cid), [])
+        spa_markers[cid] = [spa_genes[i] for i in idxs]
+    return spa_markers, cluster_labels
+
+
+def compute_gene_scores(spa_adata, markers_per_ct, ct_list):
+    """Compute per-spot cell-type enrichment scores using sc.tl.score_genes.
+
+    Uses scanpy's score_genes which subtracts background control gene scores,
+    providing properly normalized enrichment (as in Sun et al. 2026).
+
+    Returns:
+        np.ndarray: Score matrix [n_spots x n_types].
+    """
+    spa_cp = spa_adata.copy()
+    sc.pp.normalize_total(spa_cp)
+    sc.pp.log1p(spa_cp)
+
+    var_names = set(spa_cp.var_names)
+    scores = np.zeros((spa_cp.n_obs, len(ct_list)))
+    for j, ct in enumerate(ct_list):
+        ct_genes = [g for g in markers_per_ct.get(ct, []) if g in var_names]
+        if len(ct_genes) >= 2:
+            score_key = f'_score_{j}'
+            sc.tl.score_genes(spa_cp, ct_genes, score_name=score_key)
+            scores[:, j] = spa_cp.obs[score_key].values
+    return scores
+
+
+def compute_signature_scores(spa_adata, df_ref, classes, ct_list, topk_sig=50):
+    """Compute per-spot cell-type scores from the reference signature profile.
+
+    For each cell type, selects the top *topk_sig* genes with the highest
+    fold-change over the mean of other cell types in the reference signature,
+    then uses sc.tl.score_genes to score spatial spots.
+
+    Returns:
+        np.ndarray: Score matrix [n_spots x n_types].
+    """
+    classes = np.asarray(classes)
+    ct_list = np.asarray(ct_list)
+    expr = df_ref.values
+    gene_names = list(df_ref.columns)
+
+    sig = np.vstack([expr[classes == ct].mean(axis=0) for ct in ct_list])
+    overall_mean = sig.mean(axis=0, keepdims=True) + 1e-10
+
+    spa_cp = spa_adata.copy()
+    sc.pp.normalize_total(spa_cp)
+    sc.pp.log1p(spa_cp)
+    var_set = set(spa_cp.var_names)
+
+    scores = np.zeros((spa_cp.n_obs, len(ct_list)))
+    for j, ct in enumerate(ct_list):
+        fold_change = sig[j] / overall_mean.ravel()
+        ranked_idx = np.argsort(-fold_change)
+        ct_genes = []
+        for idx in ranked_idx:
+            g = gene_names[idx]
+            if g in var_set:
+                ct_genes.append(g)
+            if len(ct_genes) >= topk_sig:
+                break
+        if len(ct_genes) >= 2:
+            score_key = f'_sigscore_{j}'
+            sc.tl.score_genes(spa_cp, ct_genes, score_name=score_key)
+            scores[:, j] = spa_cp.obs[score_key].values
+    return scores
+
+
+def map_clusters_to_celltypes(spa_markers, ref_markers_per_ct, ct_list):
+    """Map spatial Leiden clusters to reference cell types via marker overlap (Phase 4).
+
+    Returns:
+        np.ndarray: Association matrix [n_clusters x n_types], Jaccard scores.
+    """
+    cluster_ids = sorted(spa_markers.keys())
+    assoc = np.zeros((len(cluster_ids), len(ct_list)))
+    for i, cid in enumerate(cluster_ids):
+        spa_set = set(spa_markers[cid])
+        for j, ct in enumerate(ct_list):
+            ref_set = set(ref_markers_per_ct.get(ct, []))
+            inter = len(spa_set & ref_set)
+            union = len(spa_set | ref_set)
+            assoc[i, j] = inter / max(union, 1)
+    row_sums = assoc.sum(axis=1, keepdims=True)
+    assoc = assoc / np.maximum(row_sums, 1e-10)
+    return assoc, cluster_ids
+
+
 def train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa=1.0,
-                   truth_autocorr=None, method_autocorr='moranI'):
+                   truth_autocorr=None, method_autocorr='moranI',
+                   epoch_frac=1.0,
+                   wt_l1=5.0, wt_abd=2.0, wt_l2_G=2.0, wt_l2_S=2.0,
+                   grad_clip=0.0):
     model.train()
     optimizer.zero_grad()
     loss = model.loss(X, Y, cls_abd_sig, 
                       truth_autocorr=truth_autocorr, 
                       wt_spa=wt_spa,
-                      method_autocorr=method_autocorr
+                      wt_l1=wt_l1, wt_abd=wt_abd,
+                      wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
+                      method_autocorr=method_autocorr,
+                      epoch_frac=epoch_frac
                       )
     loss.backward()
+    if grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     info = f'loss: {loss.item():.6f}'
     return info
@@ -317,31 +635,47 @@ def fit_deconv(
             gene_mask: pd.DataFrame=None,
             normalize_sig: bool=False,
             raw_counts: bool=True,
+            init_weights: np.ndarray=None,
+            anchor_weight: float=0.0,
+            wt_l1: float=5.0,
+            wt_abd: float=2.0,
+            wt_l2_G: float=2.0,
+            wt_l2_S: float=2.0,
+            sig_mask_weight: float=1.0,
+            rate_sig: bool=False,
+            platform_norm: bool=False,
+            cosine_lr: bool=False,
+            warmup_epochs: int=0,
+            grad_clip: float=0.0,
             device: torch.device=None,
             seed: int=None):
     indices = select_top_variable_genes(df_ref.values, n_top_genes)
     X = df_ref.values[:, indices]
     Y = df_tgt.values[:, indices]
 
-    g_cls_sig, cls_abd_sig = signature(classes, ct_list, X, raw_counts=raw_counts)
+    g_cls_sig, cls_abd_sig = signature(classes, ct_list, X, raw_counts=rate_sig)
 
-    if gene_mask is not None:
-        selected_genes = df_ref.columns[indices]
-        mask_aligned = gene_mask.reindex(index=ct_list, columns=selected_genes, fill_value=False).values.astype(np.float64)
-        g_cls_sig = g_cls_sig * mask_aligned
+    if gene_mask is not None and sig_mask_weight < 1.0:
+        gene_cols = df_ref.columns[indices]
+        shared = gene_mask.columns.intersection(gene_cols)
+        if len(shared) > 0:
+            gene_col_list = list(gene_cols)
+            col_map = {g: gene_col_list.index(g) for g in shared}
+            mask_sub = gene_mask.reindex(index=ct_list, columns=shared).values
+            soft_mask = np.ones_like(g_cls_sig)
+            for g, j in col_map.items():
+                soft_mask[:, j] = np.where(mask_sub[:, list(shared).index(g)],
+                                           1.0, sig_mask_weight)
+            g_cls_sig = g_cls_sig * soft_mask
 
-    if normalize_sig:
-        row_norms = np.linalg.norm(g_cls_sig, axis=1, keepdims=True)
-        g_cls_sig = g_cls_sig / (row_norms + 1e-10)
-
-    g_cls_sig, log_platform_factor = platform_effect_normalize(g_cls_sig, Y, cls_abd_sig)
-
-    scaler_g_init = tensify(log_platform_factor.reshape(1, -1), device)
-
-    if raw_counts:
+    if platform_norm:
+        g_cls_sig, log_platform_factor = platform_effect_normalize(
+            g_cls_sig, Y, cls_abd_sig)
+        scaler_g_init = tensify(log_platform_factor.reshape(1, -1), device)
         lib_size = Y.sum(axis=1, keepdims=True).astype(np.float64)
         scaler_s_init = tensify(np.log(lib_size + 1e-10), device)
     else:
+        scaler_g_init = None
         scaler_s_init = None
 
     X, Y = tensify(g_cls_sig, device), tensify(Y, device)
@@ -358,27 +692,52 @@ def fit_deconv(
                  dim_ref_inputs=X.shape[0],
                  tau=tau,
                  spa_autocorr=None if spa_adj is None else SpaAutoCorr(spa_adj),
+                 anchor_weight=anchor_weight,
                  scaler_g_init=scaler_g_init,
                  scaler_s_init=scaler_s_init,
-                 raw_counts=raw_counts,
                  device=device,
                  seed=seed).to(device)
+
+    if init_weights is not None:
+        with torch.no_grad():
+            W_init = torch.tensor(init_weights.T, dtype=torch.float32, device=device)
+            model.trans.trans.copy_(torch.sqrt(W_init + 1e-10))
+            model.register_buffer('W_anchor', W_init)
 
     if spa_adj is not None:
         with torch.no_grad():
             truth_autocorr = model.spa_autocorr.cal_spa_stats(Y, autocorr_method)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
-    pbar = tqdm(range(n_epochs))
+    if cosine_lr:
+        if warmup_epochs > 0:
+            warmup_sched = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0,
+                total_iters=warmup_epochs)
+            cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=n_epochs - warmup_epochs)
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer, schedulers=[warmup_sched, cosine_sched],
+                milestones=[warmup_epochs])
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=n_epochs)
+    else:
+        scheduler = None
+    pbar = tqdm(range(n_epochs), disable=not sys.stderr.isatty())
 
     for ith_epoch in pbar:
         info  = train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa,
                                   None if spa_adj is None else truth_autocorr,
-                                  autocorr_method
+                                  autocorr_method,
+                                  epoch_frac=(ith_epoch + 1) / n_epochs,
+                                  wt_l1=wt_l1, wt_abd=wt_abd,
+                                  wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
+                                  grad_clip=grad_clip,
                                   )
-        scheduler.step()
-        pbar.set_description(f"[LinTrans] Epoch: {ith_epoch+1}/{n_epochs}, {info}")    
+        if scheduler is not None:
+            scheduler.step()
+        pbar.set_description(f"[LinTrans] Epoch: {ith_epoch+1}/{n_epochs}, {info}")
 
     return model, X, Y
 
@@ -403,6 +762,10 @@ def expDeconv(adata_ref: sc.AnnData=None,
               n_top_genes: int=2000,
               topk: int=100,
               wt_spa: float=1.0,
+              wt_l1: float=5.0,
+              wt_abd: float=2.0,
+              wt_l2_G: float=2.0,
+              wt_l2_S: float=2.0,
               autocorr_method: str='moranI',
               spa_adj:sparse.coo_array=None,
               spa_adata: sc.AnnData=None,
@@ -410,8 +773,21 @@ def expDeconv(adata_ref: sc.AnnData=None,
               gene_mask: pd.DataFrame=None,
               normalize_sig: bool=True,
               raw_counts: bool=None,
+              smart_markers: bool=False,
+              spatial_markers: bool=False,
+              score_init: bool=False,
+              sig_score_init: bool=False,
+              cluster_mapping: bool=False,
+              anchor_weight: float=0.0,
+              sig_mask_weight: float=1.0,
+              rate_sig: bool=False,
+              platform_norm: bool=False,
+              cosine_lr: bool=False,
+              warmup_epochs: int=0,
+              grad_clip: float=0.0,
               device: torch.device=None,
-              seed: int=None):
+              seed: int=None,
+              _cache_path: str=None):
     """Cell type deconvolution.
 
     Fits a linear translation model from reference cell-type gene signatures to
@@ -431,41 +807,28 @@ def expDeconv(adata_ref: sc.AnnData=None,
     Args:
         adata_ref (sc.AnnData, optional): Reference scRNA-seq AnnData.
         adata_tgt (sc.AnnData, optional): Spatial transcriptomics AnnData.
-        label_key (str, optional): Column in ``adata_ref.obs`` containing
-            cell-type labels. Defaults to 'Class'.
-        df_ref (pd.DataFrame, optional): Single cell reference dataframe.
-        df_tgt (pd.DataFrame, optional): ST dataframe.
-        classes (np.array, optional): Cell type annotations for single cell.
-        ct_list (np.array, optional): Cell type label list.
-        lr (float, optional): Defaults to 1e-2.
-        weight_decay (float, optional): Defaults to 1e-2.
-        tau (float, optional): Softmax temperature for the mapping matrix.
-            Smaller values produce sharper (more peaked) cell-type weight
-            distributions per spot. Defaults to None.
-        n_epochs (int, optional): Number of epochs for fitting. Defaults to 8000.
-        n_top_genes (int, optional): Number of top variable genes. Defaults to 2000.
-            Ignored when topk is set.
-        topk (int, optional): Number of top marker genes per cell type to select
-            via Wilcoxon test. When set, performs DE-based gene selection and
-            builds a per-type gene mask automatically, ignoring n_top_genes.
-            Defaults to 100.
-        wt_spa (float, optional): Weight of spatial regularization. Defaults to 1.0.
-        autocorr_method (str, optional): Defaults to 'moranI'.
-        spa_adj (sparse.coo_array, optional): Spatial adjacency matrix. Defaults to None.
-        spa_adata (sc.AnnData, optional): Spatial AnnData object with spatial
-            coordinates. When provided, Leiden clustering is performed on the
-            spatial data and mean cluster profiles are used as supplementary
-            training targets for more robust mapping. Defaults to None.
-        calibrate (float, optional): Calibration strength (0.0-1.0).
-            Defaults to 0.0.
-        gene_mask (pd.DataFrame, optional): Boolean DataFrame [n_cell_types x n_genes].
-            Overridden when topk is set. Defaults to None.
-        normalize_sig (bool, optional): Whether to L2-normalize cell-type
-            signatures. Recommended when using gene_mask. Defaults to True.
-        raw_counts (bool, optional): Whether the input data is raw integer
-            counts. When ``None`` (default), auto-detected via heuristic.
-        device (torch.device, optional): Defaults to None.
-        seed (int, optional): Defaults to None.
+        label_key (str): Column in ``adata_ref.obs`` for cell-type labels.
+        df_ref, df_tgt, classes, ct_list: Legacy DataFrame-mode inputs.
+        lr, weight_decay: Optimiser hyperparameters.
+        tau (float, optional): Softmax temperature.
+        n_epochs (int): Training epochs.
+        n_top_genes (int): Variable genes (ignored when topk is set).
+        topk (int): Marker genes per cell type via DE test.
+        wt_spa (float): Spatial regularization weight.
+        autocorr_method (str): 'moranI' or 'gearyC'.
+        spa_adj: Spatial adjacency matrix.
+        spa_adata: Spatial AnnData for Leiden clustering.
+        calibrate (float): Post-hoc calibration strength.
+        gene_mask: Boolean mask [n_types x n_genes].
+        normalize_sig (bool): L2-normalize cell-type signatures.
+        raw_counts (bool, optional): Auto-detected if None.
+        smart_markers (bool): Phase 1 -- abundance-aware marker selection.
+        spatial_markers (bool): Phase 2 -- augment with spatial-derived markers.
+        score_init (bool): Phase 3 -- sc.tl.score_genes warm-start.
+        cluster_mapping (bool): Phase 4 -- cluster-to-celltype mapping reg.
+        anchor_weight (float): Phase 5 -- KL anchor penalty weight.
+        device: Torch device.
+        seed: Random seed.
 
     Returns:
         np.array, np.ndarray: predicted ST expression, weight matrix
@@ -486,18 +849,57 @@ def expDeconv(adata_ref: sc.AnnData=None,
     if raw_counts is None:
         raw_counts = is_count_data(df_ref.values if df_ref is not None else df_tgt.values)
 
+    markers_per_ct = {}
+
     if topk is not None and topk > 0:
-        df_ref, df_tgt, _topk_mask = select_deconv_genes(
-            df_ref, df_tgt, classes, ct_list, topk=topk
-        )
+        if smart_markers:
+            df_ref, df_tgt, _topk_mask = select_deconv_genes_v2(
+                df_ref, df_tgt, classes, ct_list, topk=topk)
+        else:
+            df_ref, df_tgt, _topk_mask = select_deconv_genes(
+                df_ref, df_tgt, classes, ct_list, topk=topk)
         if gene_mask is None:
             gene_mask = _topk_mask
         elif gene_mask is False:
             gene_mask = None
         n_top_genes = None
 
+        for ct in ct_list:
+            markers_per_ct[ct] = list(
+                _topk_mask.columns[_topk_mask.loc[ct].values])
+
+    spa_cluster_labels = None
+    spa_markers_dict = None
     if spa_adata is not None:
         cluster_labels, _ = leiden_cluster(spa_adata, normalize=True)
+        spa_cluster_labels = cluster_labels
+
+        if spatial_markers:
+            spa_markers_dict, spa_cluster_labels = select_spatial_markers(
+                spa_adata, df_tgt.columns.tolist(), topk=topk or 30,
+                _cached_labels=cluster_labels)
+            spa_marker_genes = np.unique(np.concatenate(
+                list(spa_markers_dict.values())))
+            if gene_mask is not None and len(spa_marker_genes) > 0:
+                best_ct_for_cluster = {}
+                if markers_per_ct:
+                    for cid, cid_genes in spa_markers_dict.items():
+                        cid_set = set(cid_genes)
+                        best_ct, best_overlap = None, 0
+                        for ct in ct_list:
+                            overlap = len(cid_set & set(markers_per_ct.get(ct, [])))
+                            if overlap > best_overlap:
+                                best_ct, best_overlap = ct, overlap
+                        if best_ct is not None:
+                            best_ct_for_cluster[cid] = best_ct
+                for cid, cid_genes in spa_markers_dict.items():
+                    ct = best_ct_for_cluster.get(cid)
+                    if ct is None:
+                        continue
+                    for g in cid_genes:
+                        if g in gene_mask.columns:
+                            gene_mask.loc[ct, g] = True
+
         spa_clusters = cluster_labels.values
         cluster_ids = np.unique(spa_clusters)
         spot_names = spa_adata.obs_names
@@ -521,9 +923,97 @@ def expDeconv(adata_ref: sc.AnnData=None,
     else:
         n_original_spots = None
 
+    init_weights = None
+    if score_init and markers_per_ct and spa_adata is not None:
+        score_matrix = compute_gene_scores(spa_adata, markers_per_ct, ct_list)
+        init_weights = np.clip(score_matrix, 0, None)
+        row_sums = init_weights.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        init_weights = init_weights / row_sums
+        n_total_tgt = len(df_tgt)
+        if init_weights.shape[0] < n_total_tgt:
+            n_aug = n_total_tgt - init_weights.shape[0]
+            aug_w = np.full((n_aug, len(ct_list)), 1.0 / len(ct_list))
+            init_weights = np.vstack([init_weights, aug_w])
+
+    if sig_score_init and spa_adata is not None:
+        sig_scores = compute_signature_scores(
+            spa_adata, df_ref, classes, ct_list, topk_sig=topk or 50)
+        sig_weights = np.clip(sig_scores, 0, None)
+        row_sums = sig_weights.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        sig_weights = sig_weights / row_sums
+        if init_weights is not None:
+            base = init_weights[:spa_adata.n_obs]
+            init_weights[:spa_adata.n_obs] = 0.5 * base + 0.5 * sig_weights
+            row_sums = init_weights.sum(axis=1, keepdims=True)
+            row_sums[row_sums == 0] = 1.0
+            init_weights = init_weights / row_sums
+        else:
+            init_weights = sig_weights
+            n_total_tgt = len(df_tgt)
+            if init_weights.shape[0] < n_total_tgt:
+                n_aug = n_total_tgt - init_weights.shape[0]
+                aug_w = np.full((n_aug, len(ct_list)), 1.0 / len(ct_list))
+                init_weights = np.vstack([init_weights, aug_w])
+
+    if cluster_mapping and spa_markers_dict is not None and spa_cluster_labels is not None:
+        assoc_matrix, cids = map_clusters_to_celltypes(
+            spa_markers_dict, markers_per_ct, ct_list)
+        cid_to_idx = {c: i for i, c in enumerate(cids)}
+        indirect_props = np.zeros((spa_adata.n_obs, len(ct_list)))
+        for s, label in enumerate(spa_cluster_labels.values):
+            idx = cid_to_idx.get(label, None)
+            if idx is not None:
+                indirect_props[s] = assoc_matrix[idx]
+            else:
+                indirect_props[s] = 1.0 / len(ct_list)
+        row_sums = indirect_props.sum(axis=1, keepdims=True)
+        indirect_props = indirect_props / np.maximum(row_sums, 1e-10)
+
+        if init_weights is not None:
+            blend = 0.85
+            base = init_weights[:spa_adata.n_obs]
+            blended = blend * base + (1 - blend) * indirect_props
+            blended = blended / blended.sum(axis=1, keepdims=True)
+            init_weights[:spa_adata.n_obs] = blended
+        else:
+            init_weights = indirect_props
+            if n_original_spots is not None:
+                n_total_tgt = len(df_tgt)
+                if init_weights.shape[0] < n_total_tgt:
+                    aug_w = np.full(
+                        (n_total_tgt - init_weights.shape[0], len(ct_list)),
+                        1.0 / len(ct_list))
+                    init_weights = np.vstack([init_weights, aug_w])
+
     if n_top_genes is not None and n_top_genes > 0:
         n_top_genes = min(n_top_genes, min(df_ref.shape[1], df_tgt.shape[1]))
-            
+
+    # --- Preprocess/train cache split ---
+    if _cache_path is not None:
+        import pickle as _pkl
+        if not os.path.exists(_cache_path):
+            _cache_data = dict(
+                df_ref=df_ref, df_tgt=df_tgt, classes=classes,
+                ct_list=ct_list, n_top_genes=n_top_genes,
+                init_weights=init_weights,
+                n_original_spots=n_original_spots,
+            )
+            with open(_cache_path, 'wb') as _cf:
+                _pkl.dump(_cache_data, _cf, protocol=4)
+            return None, None
+        else:
+            with open(_cache_path, 'rb') as _cf:
+                _cache_data = _pkl.load(_cf)
+            df_ref = _cache_data['df_ref']
+            df_tgt = _cache_data['df_tgt']
+            classes = _cache_data['classes']
+            ct_list = _cache_data['ct_list']
+            n_top_genes = _cache_data['n_top_genes']
+            init_weights = _cache_data['init_weights']
+            n_original_spots = _cache_data['n_original_spots']
+
     model, X, Y = fit_deconv(
                             df_ref, df_tgt,
                             lr, weight_decay, n_epochs,
@@ -535,8 +1025,16 @@ def expDeconv(adata_ref: sc.AnnData=None,
                             autocorr_method=autocorr_method,
                             spa_adj=spa_adj,
                             gene_mask=gene_mask,
-                            normalize_sig=normalize_sig,
-                            raw_counts=raw_counts,
+                            init_weights=init_weights,
+                            anchor_weight=anchor_weight,
+                            wt_l1=wt_l1, wt_abd=wt_abd,
+                            wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
+                            sig_mask_weight=sig_mask_weight,
+                            rate_sig=rate_sig,
+                            platform_norm=platform_norm,
+                            cosine_lr=cosine_lr,
+                            warmup_epochs=warmup_epochs,
+                            grad_clip=grad_clip,
                             device=device,
                             seed=seed) 
     with torch.no_grad():
@@ -645,7 +1143,7 @@ def fit_transImp(
                 seed=seed).to(device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)        
-    pbar = tqdm(range(n_epochs))
+    pbar = tqdm(range(n_epochs), disable=not sys.stderr.isatty())
 
     for ith_epoch in pbar:
         info  = train_imp_step(optimizer, model, X, Y, wt_spa, wt_l1norm, wt_l2norm)
@@ -726,7 +1224,7 @@ def fit_transImp_batched(
     loader = DataLoader(TensorDataset(spot_indices),
                         batch_size=batch_size, shuffle=True)
     
-    pbar = tqdm(range(n_epochs))
+    pbar = tqdm(range(n_epochs), disable=not sys.stderr.isatty())
     for ith_epoch in pbar:
         epoch_loss, epoch_imp, epoch_spa = 0.0, 0.0, 0.0
         n_batches = 0
@@ -790,6 +1288,7 @@ def estimate_performance_uncertainty(model,
                                      n_simulation, 
                                      convert_uncertainty_score, 
                                      device=None):
+    from torchmetrics.functional.regression import cosine_similarity
     X = torch.cat([train_X, test_X], dim=1)
     y = model(X)
     sim_res_lc = estimate_uncertainty_local(model,  X, classes, n_simulations=n_simulation)
