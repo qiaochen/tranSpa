@@ -363,7 +363,10 @@ class TransDeconv(nn.Module):
              wt_abd:  float=2.0,
              wt_spa:  float=1.0,
              method_autocorr: str=CANO_NAME_MORANSI,
-             epoch_frac: float=1.0):
+             epoch_frac: float=1.0,
+             wt_mse: float=0.0,
+             huber: bool=True,
+             wt_js: float=0.0):
         """Calculate translation loss given ground truths
 
         Args:
@@ -409,6 +412,23 @@ class TransDeconv(nn.Module):
         
         loss = imp_loss +  wt_l2_G * l2normG + wt_l2_S * l2normS + \
                 wt_l1 * l1norm + wt_abd * abd_norm + wt_spa * spa_reg
+
+        if wt_mse > 0:
+            if huber:
+                mse_term = F.smooth_l1_loss(Y_hat[sel_valid], Y[sel_valid])
+            else:
+                mse_term = F.mse_loss(Y_hat[sel_valid], Y[sel_valid])
+            loss = loss + wt_mse * mse_term
+
+        if wt_js > 0:
+            Y_hat_prop = Y_hat[sel_valid] / (Y_hat[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
+            Y_prop = Y[sel_valid] / (Y[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
+            Y_hat_prop = Y_hat_prop.clamp(min=1e-10)
+            Y_prop = Y_prop.clamp(min=1e-10)
+            M = 0.5 * (Y_hat_prop + Y_prop)
+            js_term = 0.5 * (F.kl_div(M.log(), Y_hat_prop, reduction='batchmean') +
+                             F.kl_div(M.log(), Y_prop, reduction='batchmean'))
+            loss = loss + wt_js * js_term
 
         if self.anchor_weight > 0 and hasattr(self, 'W_anchor'):
             W_raw = self.trans._get_weight_mtx()

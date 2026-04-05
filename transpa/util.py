@@ -576,7 +576,8 @@ def train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa=1.0,
                    truth_autocorr=None, method_autocorr='moranI',
                    epoch_frac=1.0,
                    wt_l1=5.0, wt_abd=2.0, wt_l2_G=2.0, wt_l2_S=2.0,
-                   grad_clip=0.0):
+                   grad_clip=0.0,
+                   wt_mse=0.0, huber=True, wt_js=0.0):
     model.train()
     optimizer.zero_grad()
     loss = model.loss(X, Y, cls_abd_sig, 
@@ -585,7 +586,9 @@ def train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa=1.0,
                       wt_l1=wt_l1, wt_abd=wt_abd,
                       wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
                       method_autocorr=method_autocorr,
-                      epoch_frac=epoch_frac
+                      epoch_frac=epoch_frac,
+                      wt_mse=wt_mse, huber=huber,
+                      wt_js=wt_js,
                       )
     loss.backward()
     if grad_clip > 0:
@@ -647,6 +650,9 @@ def fit_deconv(
             cosine_lr: bool=False,
             warmup_epochs: int=0,
             grad_clip: float=0.0,
+            wt_mse: float=0.0,
+            huber: bool=True,
+            wt_js: float=0.0,
             device: torch.device=None,
             seed: int=None):
     indices = select_top_variable_genes(df_ref.values, n_top_genes)
@@ -734,6 +740,8 @@ def fit_deconv(
                                   wt_l1=wt_l1, wt_abd=wt_abd,
                                   wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
                                   grad_clip=grad_clip,
+                                  wt_mse=wt_mse, huber=huber,
+                                  wt_js=wt_js,
                                   )
         if scheduler is not None:
             scheduler.step()
@@ -756,14 +764,14 @@ def expDeconv(adata_ref: sc.AnnData=None,
               classes: np.array=None, 
               ct_list: np.array=None,
               lr: float=1e-2, 
-              weight_decay: float=1e-2, 
+              weight_decay: float=1e-3, 
               tau: float=None,
               n_epochs: int=8000,
               n_top_genes: int=2000,
-              topk: int=100,
+              topk: int=50,
               wt_spa: float=1.0,
               wt_l1: float=5.0,
-              wt_abd: float=2.0,
+              wt_abd: float=0.5,
               wt_l2_G: float=2.0,
               wt_l2_S: float=2.0,
               autocorr_method: str='moranI',
@@ -775,16 +783,21 @@ def expDeconv(adata_ref: sc.AnnData=None,
               raw_counts: bool=None,
               smart_markers: bool=False,
               spatial_markers: bool=False,
-              score_init: bool=False,
+              score_init: bool=True,
               sig_score_init: bool=False,
-              cluster_mapping: bool=False,
+              cluster_mapping: bool=True,
               anchor_weight: float=0.0,
               sig_mask_weight: float=1.0,
               rate_sig: bool=False,
               platform_norm: bool=False,
-              cosine_lr: bool=False,
+              cosine_lr: bool=True,
               warmup_epochs: int=0,
               grad_clip: float=0.0,
+              wt_mse: float=0.0,
+              huber: bool=True,
+              wt_js: float=2.0,
+              sharpen_temp: float=1.0,
+              topk_output: int=0,
               device: torch.device=None,
               seed: int=None,
               _cache_path: str=None):
@@ -1035,11 +1048,24 @@ def expDeconv(adata_ref: sc.AnnData=None,
                             cosine_lr=cosine_lr,
                             warmup_epochs=warmup_epochs,
                             grad_clip=grad_clip,
+                            wt_mse=wt_mse,
+                            huber=huber,
+                            wt_js=wt_js,
                             device=device,
                             seed=seed) 
     with torch.no_grad():
         model.eval()
         preds, weights = model.predict(X, return_cluster=True)
+
+    if sharpen_temp != 1.0 and sharpen_temp > 0:
+        weights = np.power(weights + 1e-30, 1.0 / sharpen_temp)
+        weights = weights / (weights.sum(axis=1, keepdims=True) + 1e-30)
+
+    if topk_output > 0 and topk_output < weights.shape[1]:
+        topk_idx = np.argsort(weights, axis=1)[:, :-topk_output]
+        for i in range(weights.shape[0]):
+            weights[i, topk_idx[i]] = 0.0
+        weights = weights / (weights.sum(axis=1, keepdims=True) + 1e-30)
 
     if calibrate:
         alpha = float(calibrate) if not isinstance(calibrate, bool) else (1.0 if calibrate else 0.0)
