@@ -20,15 +20,15 @@
 3. `expTransImp`, added batch training options to metigate OOM issues raised in [VISTA paper](https://www.nature.com/articles/s42003-025-09479-6#Fig6).
 
 # TranSpa
-This tool implements Translation-based imputation methods (TransImp) and translation based cell type deconvolution (TransDeconv). Experiments reported in the manuscript are displayed in jupyter notebooks under repo [TranSpaAnalysis](https://github.com/qiaochen/TranSpaAnalysis/tree/main). Report for `TransImp` can be accessed from biorxiv with the latest title 
+This tool implements Translation-based imputation methods (TransImp) and translation based cell type deconvolution (TransDeconv). Experiments reported in the manuscript are displayed in jupyter notebooks under repo [TranSpaAnalysis](https://github.com/qiaochen/TranSpaAnalysis/tree/main), they were run with transpa **V0.1.1**. Report for `TransImp` can be accessed from biorxiv with the latest title 
 >[Reliable imputation of spatial transcriptome with uncertainty estimation and spatial regularization](https://www.sciencedirect.com/science/article/pii/S2666389924001545)
 
 Three demo notebooks are also available under the [demo](https://github.com/qiaochen/tranSpa/tree/main/demo) folder.
 
 - [Different configurations of TransImp applied to SeqFISH dataset dataset](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish.ipynb)
 - [Exploration for unprobed genes with SeqFISH ST dataset](https://github.com/qiaochen/tranSpa/blob/main/demo/seqfish_unprobed_genes.ipynb)
-- [Cell type deconvolution with TransDeconv](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb)
-- [Cell type deconvolution and ST Velocity estimation](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb)
+- [Cell type deconvolution with TransDeconv and ST Velocity estimation](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb)
+- [Cell type deconvolution with advanced setting](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv_advanced.ipynb)
 
 ## Installation
 
