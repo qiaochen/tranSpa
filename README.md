@@ -12,7 +12,9 @@
 # Updates on **V0.2.0** :
 1. `expDeconv`, improved performance with marker gene selection, loss updates, while keeping lite-weighted and fast, achieving improved performance with default setting on the 32 benchmark datasets by [Li et al.](https://www.nature.com/articles/s41592-022-01480-9).
 
-<img src="docs/img/OverallAccuracyRanking.png" alt="Overall Accuracy Ranking" width="500"> <img src="docs/img/SubScores.png" alt="Sub-metric Scores (PCC, SSIM, RMSE, JS)" width="500">
+<div style="text-align: center;">
+<img src="docs/img/OverallAccuracyRanking.png" alt="Overall Accuracy Ranking" height="200" width="300"> <img src="docs/img/SubScores.png" alt="Sub-metric Scores (PCC, SSIM, RMSE, JS)" height="200" width="300">
+</div>
 
 2. `expVeloImp`, post-processing for imputed Spliced and Unspliced count matrices, the issue reported in Fig. 6 of [VISTA paper](https://www.nature.com/articles/s42003-025-09479-6#Fig6) is now fixed with updated experiment result in notebook [transDeconv.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb). The fix was to sparsify small non-zero values (at 1e-6 magnitude) to zero, since `scv.tl.proportions` cacluate non-zero gene counts to compute proportions, and recalibrate the proportion of spliced/unspliced imputations towards reference distributions.  
 3. `expTransImp`, added batch training options to metigate OOM issues raised in [VISTA paper](https://www.nature.com/articles/s42003-025-09479-6#Fig6).
