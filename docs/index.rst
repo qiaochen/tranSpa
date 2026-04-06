@@ -20,6 +20,8 @@ TransImp features in two novel functions: \
  1) Uncertainty score estimation for each imputed gene, allowing the identification of relible predictions; \
  2) Spatial regularisation for explicitily control the degree of spatial pattern preservation for imputation modeling.
 
+The toolkit also includes **TransDeconv**, a translation-based cell-type deconvolution method that infers per-spot cell-type proportions from spatial transcriptomics data using a scRNA-seq reference. As of v0.2, TransDeconv supports an AnnData-based interface with automatic preprocessing, marker gene selection, score-init, cluster-mapping regularization, and JS-divergence loss.
+
 Please refer to our demo notebooks for details:
 
 * `Different configurations of TransImp applied to SeqFISH dataset dataset`_.
@@ -41,6 +43,7 @@ References
 Manuscript of TransImp with more details is available on bioRxiv_ now and is currently under review.
 
 .. _bioRxiv: https://www.biorxiv.org/content/10.1101/2023.01.20.524992v1
+.. _Patterns: https://www.sciencedirect.com/science/article/pii/S2666389924001545
 
 
 
