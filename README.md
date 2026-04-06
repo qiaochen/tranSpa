@@ -18,6 +18,10 @@
 
 2. `expVeloImp`, post-processing for imputed Spliced and Unspliced count matrices, the issue reported in Fig. 6 of [VISTA paper](https://www.nature.com/articles/s42003-025-09479-6#Fig6) is now fixed with updated experiment result in notebook [transDeconv.ipynb](https://github.com/qiaochen/tranSpa/blob/main/demo/transDeconv.ipynb). The fix was to sparsify small non-zero values (at 1e-6 magnitude) to zero, since `scv.tl.proportions` cacluate non-zero gene counts to compute proportions, and recalibrate the proportion of spliced/unspliced imputations towards reference distributions.  
 3. `expTransImp`, added batch training options to metigate OOM issues raised in [VISTA paper](https://www.nature.com/articles/s42003-025-09479-6#Fig6).
+4. `expTransImp`, ran 45 benchmark datasets by [Li et al.](https://www.nature.com/articles/s41592-022-01480-9). The performances of TransImpLR and TransImpSpa are summarized as following:
+<div style="text-align: center;">
+<img src="docs/img/imputation_performance.png" alt="Overall Accuracy Ranking" height="300" width="500"> 
+</div>
 
 # TranSpa
 This tool implements Translation-based imputation methods (TransImp) and translation based cell type deconvolution (TransDeconv). Experiments reported in the manuscript are displayed in jupyter notebooks under repo [TranSpaAnalysis](https://github.com/qiaochen/TranSpaAnalysis/tree/main), they were run with transpa **V0.1.1**. Report for `TransImp` can be accessed from biorxiv with the latest title 
