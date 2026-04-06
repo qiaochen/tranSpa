@@ -4,19 +4,16 @@
 import torch
 import random
 import numpy as np
+import torch.nn.functional as F
 
-from turtle import forward
 from torch import Tensor, nn
-from typing import List, Tuple
-from torch import nn
 
 CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
 
 
 class LinTranslator(nn.Module):
-    """Linear translator
-    """
+    """Linear translator supporting both squared-param and softmax modes."""
 
     def __init__(self,
                  dim_input: int,
@@ -25,16 +22,6 @@ class LinTranslator(nn.Module):
                  seed: int=None,
                  device: torch.device=None
         ):
-        """Linear translator
-
-        Args:
-            dim_input (float): dimension of reference gene profile
-            dim_output (float): dimension of target gene profile
-            tau: (float): temporature of softmax
-            seed (int, optional): random seed. Defaults to None.
-            device (torch.device, optional): device of computation. Defaults to None.
-        """
-
         super().__init__()
         self.seed = seed
         self.device = device
@@ -48,12 +35,11 @@ class LinTranslator(nn.Module):
     def _get_weight_mtx(self):
         if self.tau is None:
             return torch.square(self.trans)
-        return torch.softmax(self.trans/self.tau, dim=0)
+        return torch.softmax(self.trans / self.tau, dim=0)
 
     def forward(self, input: Tensor, 
                       only_pred: bool=True):
         """
-
         Args:
             input (Tensor): Reference gene signature
             only_pred (bool, optional): not return weights or return. Defaults to True.
@@ -114,8 +100,7 @@ class SpaReg(SpaStats):
     def loss(self, Y_hat, score_fun='cosine'):
         spa_adj, Y_lag = self.spa_adj, self.spa_lag
         pred_lag = spa_adj @ Y_hat
-        # return self.mse(pred_lag, Y_lag)
-        neg_lag  = spa_adj @ Y_hat[np.random.permutation(Y_hat.shape[0])] # .detach()
+        neg_lag  = spa_adj @ Y_hat[np.random.permutation(Y_hat.shape[0])]
         if score_fun == "bernoulli":
             pos_score = torch.sigmoid(torch.sum(Y_lag * pred_lag, dim=1))
             neg_score = torch.sigmoid(torch.sum(Y_lag * neg_lag, dim=1))
@@ -240,6 +225,51 @@ class SpaAutoCorr(SpaStats):
         pred_stats = self.cal_spa_stats(Y_hat)
         return self.mse(pred_stats, self.truth_stats)
 
+    def loss_batch(self, Y_hat_batch: Tensor, spot_indices: Tensor):
+        """Calculate spatial regularization loss for a batch of spots.
+
+        Uses the subgraph of the adjacency matrix induced by the batch spots
+        to compute approximate autocorrelation statistics, compared against
+        the pre-computed ground truth stats for those spots.
+
+        Args:
+            Y_hat_batch (Tensor): predicted expression for batch spots [batch_size, Gene]
+            spot_indices (Tensor): indices of spots in this batch
+
+        Returns:
+            Scalar: MSE loss of batch spatial autocorrelation statistics
+        """
+        idx = spot_indices
+        sub_adj = torch.index_select(self.spa_adj, 0, idx)
+        sub_adj = torch.index_select(sub_adj, 1, idx)
+
+        gene_expr = Y_hat_batch.t()
+        W = torch.sum(sub_adj._values())
+        if W == 0:
+            return torch.tensor(0.0, device=Y_hat_batch.device)
+        N = gene_expr.shape[1]
+        centered_expr = gene_expr - torch.mean(gene_expr, dim=1, keepdim=True)
+        denominator = torch.sum(torch.square(centered_expr), dim=1)
+
+        mask = torch.zeros_like(denominator)
+        mask[denominator == 0] = 1e-8
+        denominator = denominator + mask
+
+        if self.method == CANO_NAME_MORANSI:
+            numerator = torch.sum(centered_expr * torch.sparse.mm(sub_adj, centered_expr.t()).t(), dim=1)
+            pred_stats = N / W * numerator / denominator
+        elif self.method == CANO_NAME_GEARYSC:
+            degrees = torch.sparse.sum(sub_adj, dim=1).to_dense()
+            traceZDZ_T = (degrees.view(1, -1) * torch.square(gene_expr)).sum(dim=1)
+            traceZWZ_T = torch.sum(gene_expr * torch.sparse.mm(sub_adj, gene_expr.t()).t(), dim=1)
+            numerator = 2 * (traceZDZ_T - traceZWZ_T)
+            pred_stats = (N - 1) / (2 * W) * numerator / denominator
+        else:
+            return torch.tensor(0.0, device=Y_hat_batch.device)
+
+        truth_batch = self.truth_stats[spot_indices] if self.truth_stats.dim() == 1 else self.truth_stats
+        return self.mse(pred_stats, truth_batch)
+
 
 class TransDeconv(nn.Module):
     """Translation-based cell type deconvolution     
@@ -249,20 +279,20 @@ class TransDeconv(nn.Module):
                  dim_tgt_outputs: int,
                  dim_ref_inputs:  int,
                  n_feats: int,
-                 tau: float=0.5,
+                 tau: float=None,
                  spa_autocorr: SpaAutoCorr=None,
                  device:    torch.device=None,
                  seed:       int=None
                 ):
         """
-
         Args:
-            dim_tgt_outputs (int): Dimension of ground truth gene profile
-            dim_ref_inputs (int): Dimension of reference gene signature
-            n_feats (int): number of genes
-            spa_autocorr (SpaAutoCorr, optional): Instance of Spatial index class. Default to None.
-            device (torch.device, optional): Device of computation. Defaults to None.
-            seed (int, optional): Seed number. Defaults to None.
+            dim_tgt_outputs (int): Number of spatial spots.
+            dim_ref_inputs (int): Number of reference cell types.
+            n_feats (int): Number of genes.
+            tau (float, optional): Softmax temperature; None for squared-param mode.
+            spa_autocorr (SpaAutoCorr, optional): Spatial autocorrelation regularizer.
+            device (torch.device, optional): Device of computation.
+            seed (int, optional): Random seed.
         """
         super().__init__()
         self.device = device
@@ -271,7 +301,7 @@ class TransDeconv(nn.Module):
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
-        
+
         self.scaler_g = nn.Parameter(torch.zeros(1, n_feats))
         self.bias_g = nn.Parameter(torch.zeros(1, n_feats))
         self.scaler_s = nn.Parameter(torch.zeros(dim_tgt_outputs, 1))
@@ -314,9 +344,10 @@ class TransDeconv(nn.Module):
              wt_l2_G: float=2.0,
              wt_l2_S: float=2.0,
              wt_l1:   float=5.0,
-             wt_abd:  float=2.0,
+             wt_abd:  float=0.5,
              wt_spa:  float=1.0,
-             method_autocorr: str=CANO_NAME_MORANSI):
+             method_autocorr: str=CANO_NAME_MORANSI,
+             wt_js: float=2.0):
         """Calculate translation loss given ground truths
 
         Args:
@@ -324,12 +355,13 @@ class TransDeconv(nn.Module):
             Y (Tensor): Ground truth gene profile matrix [Spot, gene]
             cls_abd_sig (Tensor): Class abundance signature.
             truth_autocorr (Tensor): Ground-Truth spatal autocorrelation indices. Defaults to None.
-            wt_l2_G (float): Weight of l2 regularization. Defaults to 2.0.
-            wt_l2_S (float): Weight of l2 regularization. Defaults to 2.0.
-            wt_l1 (float): weight of l1 regulariztion. Defaults to 5.0.
-            wt_abd (float): weight of abundance signature loss. Defaults to 2.0.
-            wt_spa (float): weight spatial regularization loss. Defaults to 1.0.
-            method_autocorr (str): name of spatial autocorrelation methods "moranI" or "gearyC"
+            wt_l2_G (float): Weight of l2 regularization on gene scalers. Defaults to 2.0.
+            wt_l2_S (float): Weight of l2 regularization on spot scalers. Defaults to 2.0.
+            wt_l1 (float): Weight of l1 regulariztion on translation matrix. Defaults to 5.0.
+            wt_abd (float): Weight of abundance signature loss. Defaults to 0.5.
+            wt_spa (float): Weight of spatial regularization loss. Defaults to 1.0.
+            method_autocorr (str): Spatial autocorrelation method, "moranI" or "gearyC".
+            wt_js (float): Weight of Jensen-Shannon divergence loss. Defaults to 2.0.
 
         Returns:
             Tensor: scalar loss
@@ -348,7 +380,7 @@ class TransDeconv(nn.Module):
         abd_sig_hat = torch.sum(self.trans.trans ** 2, dim=1, keepdim=True)
         abd_sig =  cls_abd_sig
         
-        W = torch.square(self.trans.trans.t())
+        W = torch.square(self.trans.trans.t()) if self.trans.tau is None else self.trans._get_weight_mtx()
         l1norm = torch.norm(W, p=1, dim=1).mean()
         l2normG = torch.norm(torch.exp(self.scaler_g), p=2)
         l2normS = torch.norm(torch.exp(self.scaler_s), p=2)
@@ -362,6 +394,17 @@ class TransDeconv(nn.Module):
         
         loss = imp_loss +  wt_l2_G * l2normG + wt_l2_S * l2normS + \
                 wt_l1 * l1norm + wt_abd * abd_norm + wt_spa * spa_reg
+
+        if wt_js > 0:
+            Y_hat_prop = Y_hat[sel_valid] / (Y_hat[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
+            Y_prop = Y[sel_valid] / (Y[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
+            Y_hat_prop = Y_hat_prop.clamp(min=1e-10)
+            Y_prop = Y_prop.clamp(min=1e-10)
+            M = 0.5 * (Y_hat_prop + Y_prop)
+            js_term = 0.5 * (F.kl_div(M.log(), Y_hat_prop, reduction='batchmean') +
+                             F.kl_div(M.log(), Y_prop, reduction='batchmean'))
+            loss = loss + wt_js * js_term
+
         return loss
         
         
@@ -409,15 +452,10 @@ class RaTranslator(nn.Module):
             random.seed(seed)
             np.random.seed(seed)
 
-        # self.trans1 = nn.Parameter(torch.randn(dim_input, dim_hid))
-        # self.relu = nn.ReLU()
-        # self.trans2 = nn.Parameter(torch.randn(dim_hid, dim_output))
-        # self.scaler = nn.Parameter(torch.ones(1, dim_output))
         self.trans = nn.Parameter(torch.randn(dim_input, dim_output))
 
     def _get_weight_mtx(self):
         return torch.softmax(self.trans, dim=0)
-        # return torch.sigmoid(self.trans1) @ torch.sigmoid(self.trans2, dim=0)
 
     def sparse_reg(self):
         return 0
@@ -437,11 +475,23 @@ class RaTranslator(nn.Module):
             : Translation results [translation weight matrix [Spot, Cell] ] 
         """
         trans = input @ self._get_weight_mtx()
-        # trans = torch.square(self.scaler) * self.relu(self.relu(input @ self.trans1) @ self.trans2)
         if only_pred:
             return trans
         
         return trans, self._get_weight_mtx().t()      
+
+    def forward_batch(self, input: Tensor, spot_indices: Tensor):
+        """Forward pass for a subset of spots.
+
+        Args:
+            input (Tensor): Reference gene signature [Gene, Cell]
+            spot_indices (Tensor): Indices of spots in this batch
+
+        Returns:
+            Tensor: Translation results for selected spots [Gene, batch_size]
+        """
+        W_batch = torch.softmax(self.trans[:, spot_indices], dim=0)
+        return input @ W_batch
 
 
 class RaTranslatorLowRank(nn.Module):
@@ -503,11 +553,24 @@ class RaTranslatorLowRank(nn.Module):
             : Translation results [translation weight matrix [Spot, Cell] ] 
         """
         trans = self.transform(input)
-        # trans = torch.square(self.scaler) * self.relu(self.relu(input @ self.trans1) @ self.trans2)
         if only_pred:
             return trans
         
         return trans, self._get_weight_mtx().t()   
+
+    def forward_batch(self, input: Tensor, spot_indices: Tensor):
+        """Forward pass for a subset of spots.
+
+        Args:
+            input (Tensor): Reference gene signature [Gene, Cell]
+            spot_indices (Tensor): Indices of spots in this batch
+
+        Returns:
+            Tensor: Translation results for selected spots [Gene, batch_size]
+        """
+        W1 = torch.clip(torch.square(self.trans1), max=self.clip_max)
+        W2_batch = torch.softmax(self.trans2[:, spot_indices], dim=0)
+        return input @ W1 @ W2_batch
 
 class RaTranslatorNoneLinear(nn.Module):
     """Linear translator
@@ -566,6 +629,18 @@ class RaTranslatorNoneLinear(nn.Module):
         trans = self.transform(input)
         # trans = torch.square(self.scaler) * self.relu(self.relu(input @ self.trans1) @ self.trans2)
         return trans
+
+    def forward_batch(self, input: Tensor, spot_indices: Tensor):
+        """Forward pass for a subset of spots.
+
+        Args:
+            input (Tensor): Reference gene signature [Gene, Cell]
+            spot_indices (Tensor): Indices of spots in this batch
+
+        Returns:
+            Tensor: Translation results for selected spots [Gene, batch_size]
+        """
+        return self.relu(self.relu(input @ self.trans1) @ self.trans2[:, spot_indices])
 
 
 class TransImp(nn.Module):
@@ -646,6 +721,101 @@ class TransImp(nn.Module):
             preds = preds / max(torch.std(preds).item(), 1e-6)
         return preds.cpu().numpy()
 
+    def predict_raw(self, X: Tensor) -> Tensor:
+        """Translate without per-call std normalization.
+
+        Use this when multiple predictions (e.g. spliced and unspliced)
+        must share the same scale so their relative magnitudes are preserved.
+
+        Args:
+            X (Tensor): Reference gene signature [Cell, Gene]
+
+        Returns:
+            Tensor: Raw translation result (stays on device)
+        """
+        self.eval()
+        with torch.no_grad():
+            return self(X)
+
+    def predict_batched(self, X: Tensor, batch_size: int=8192) -> np.ndarray:
+        """Chunked prediction for large numbers of spots.
+
+        Args:
+            X (Tensor): Reference gene signature [Cell, Gene]
+            batch_size (int): Number of spots per chunk. Defaults to 8192.
+
+        Returns:
+            np.ndarray: Translation result [Spot, Gene]
+        """
+        self.eval()
+        n_spots = self.trans.trans.shape[1] if hasattr(self.trans, 'trans') else self.trans.trans2.shape[1]
+        chunks = []
+        with torch.no_grad():
+            for start in range(0, n_spots, batch_size):
+                end = min(start + batch_size, n_spots)
+                idx = torch.arange(start, end, device=X.device)
+                chunk = self.trans.forward_batch(X.t(), idx).t()
+                chunks.append(chunk)
+            preds = torch.cat(chunks, dim=0)
+            preds = preds / max(torch.std(preds).item(), 1e-6)
+        return preds.cpu().numpy()
+
+    def _calibration_scale(self, train_X: Tensor, train_Y: Tensor) -> float:
+        """Compute a global scale factor from training genes where ground truth exists."""
+        raw_train = self(train_X)
+        return train_Y.std().item() / max(raw_train.std().item(), 1e-6)
+
+    def predict_calibrated(self, test_X: Tensor,
+                           train_X: Tensor, train_Y: Tensor) -> np.ndarray:
+        """Translate and calibrate output scale to match observed ST data.
+
+        Computes a global scale factor from training genes (where ground truth
+        is available) and applies it to test gene predictions, so the imputed
+        expression lives on the same scale as the observed ST.
+
+        Args:
+            test_X (Tensor): Reference signature for test genes [Cell/Cluster, test_Gene]
+            train_X (Tensor): Reference signature for training genes [Cell/Cluster, train_Gene]
+            train_Y (Tensor): Observed ST expression for training genes [Spot, train_Gene]
+
+        Returns:
+            np.ndarray: Calibrated predictions [Spot, test_Gene]
+        """
+        self.eval()
+        with torch.no_grad():
+            scale = self._calibration_scale(train_X, train_Y)
+            preds = self(test_X) * scale
+        return preds.cpu().numpy()
+
+    def predict_batched_calibrated(self, test_X: Tensor,
+                                   train_X: Tensor, train_Y: Tensor,
+                                   batch_size: int=8192) -> np.ndarray:
+        """Chunked calibrated prediction for large numbers of spots.
+
+        Same as predict_calibrated but processes spots in chunks to avoid OOM.
+
+        Args:
+            test_X (Tensor): Reference signature for test genes [Cell/Cluster, test_Gene]
+            train_X (Tensor): Reference signature for training genes [Cell/Cluster, train_Gene]
+            train_Y (Tensor): Observed ST expression for training genes [Spot, train_Gene]
+            batch_size (int): Number of spots per chunk. Defaults to 8192.
+
+        Returns:
+            np.ndarray: Calibrated predictions [Spot, test_Gene]
+        """
+        self.eval()
+        n_spots = self.trans.trans.shape[1] if hasattr(self.trans, 'trans') else self.trans.trans2.shape[1]
+        with torch.no_grad():
+            scale = self._calibration_scale(train_X, train_Y)
+            chunks = []
+            for start in range(0, n_spots, batch_size):
+                end = min(start + batch_size, n_spots)
+                idx = torch.arange(start, end, device=test_X.device)
+                chunk = self.trans.forward_batch(test_X.t(), idx).t()
+                chunks.append(chunk)
+            preds = torch.cat(chunks, dim=0) * scale
+        return preds.cpu().numpy()
+
     def loss(self, 
              X: Tensor, 
              Y: Tensor, 
@@ -689,6 +859,56 @@ class TransImp(nn.Module):
             loss = loss + wt_spa * spa_reg           
         
         return loss, imp_loss.item(), spa_reg.item() if not self.spa_inst is None and wt_spa > 0 else 0
+
+    def loss_batch(self,
+                   X: Tensor,
+                   Y_batch: Tensor,
+                   spot_indices: Tensor,
+                   wt_l1norm: float=1e-2,
+                   wt_l2norm: float=1e-2,
+                   wt_spa: float=1e-1,
+                   gene_weights=1,
+                   ):
+        """Calculate translation loss on a mini-batch of spots.
+
+        Uses forward_batch to only compute predictions for the selected spots,
+        enabling training on datasets with millions of spots.
+
+        Args:
+            X (Tensor): Reference gene signature matrix [Cell, Gene]
+            Y_batch (Tensor): Ground truth for batch spots [batch_size, Gene]
+            spot_indices (Tensor): Indices of spots in this batch
+            wt_l1norm (float): L1 regularization weight. Default to 1e-2.
+            wt_l2norm (float): L2 regularization weight. Default to 1e-2.
+            wt_spa (float): Spatial regularization weight. Default to 1e-1.
+            gene_weights: Per-gene weights for column cosine loss. Default to 1.
+
+        Returns:
+            Tuple: (loss, imp_loss_value, spa_reg_value)
+        """
+        Y_hat_batch = self.trans.forward_batch(X.t(), spot_indices).t()
+
+        norm_Y_hat = torch.norm(Y_hat_batch, dim=1)
+        sel_valid = (norm_Y_hat != 0) & ~torch.isnan(norm_Y_hat) & ~torch.isinf(norm_Y_hat)
+
+        loss1 = (1 - self.cos_by_col(Y_hat_batch[sel_valid], Y_batch[sel_valid])).mean()
+        loss2 = ((1 - self.cos_by_row(Y_hat_batch[sel_valid], Y_batch[sel_valid])) * gene_weights).mean()
+        imp_loss = loss1 + loss2
+
+        if not wt_l1norm is None and wt_l1norm > 0:
+            imp_loss = imp_loss + wt_l1norm * self.trans.sparse_reg()
+        if not wt_l2norm is None and wt_l2norm > 0:
+            imp_loss = imp_loss + wt_l2norm * self.trans.scale_reg()
+
+        loss = imp_loss
+        spa_reg = 0
+
+        if not self.spa_inst is None and wt_spa > 0:
+            spa_reg = self.spa_inst.loss_batch(Y_hat_batch, spot_indices)
+            loss = loss + wt_spa * spa_reg
+
+        spa_val = spa_reg.item() if isinstance(spa_reg, Tensor) else spa_reg
+        return loss, imp_loss.item(), spa_val
         
         
     def forward(self, X: Tensor):
@@ -704,3 +924,16 @@ class TransImp(nn.Module):
         preds = self.trans(X.t())
         Y_hat = preds.t()
         return Y_hat
+
+    def forward_batch(self, X: Tensor, spot_indices: Tensor):
+        """Translate for a subset of spots.
+
+        Args:
+            X (Tensor): Reference gene signature [Cell, Gene]
+            spot_indices (Tensor): Indices of target spots
+
+        Returns:
+            Tensor: Predicted expression for batch spots [batch_size, Gene]
+        """
+        preds = self.trans.forward_batch(X.t(), spot_indices)
+        return preds.t()

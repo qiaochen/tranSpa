@@ -34,7 +34,7 @@ project = 'TransImp'
 author = 'Chen Qiao, Yuanhua Huang'
 copyright = f"{datetime.now():%Y}, {author}"
 # The full version, including alpha/beta/rc tags
-release = '0.1.0'
+release = '0.2.0'
 
 notebooks_url = "https://github.com/qiaochen/tranSpa/raw/main/demo/"
 notebooks = [
