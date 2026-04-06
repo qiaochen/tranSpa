@@ -6,10 +6,7 @@ import random
 import numpy as np
 import torch.nn.functional as F
 
-from turtle import forward
 from torch import Tensor, nn
-from typing import List, Tuple
-from torch import nn
 
 CANO_NAME_MORANSI = 'moranI'
 CANO_NAME_GEARYSC = 'gearyC'
@@ -103,8 +100,7 @@ class SpaReg(SpaStats):
     def loss(self, Y_hat, score_fun='cosine'):
         spa_adj, Y_lag = self.spa_adj, self.spa_lag
         pred_lag = spa_adj @ Y_hat
-        # return self.mse(pred_lag, Y_lag)
-        neg_lag  = spa_adj @ Y_hat[np.random.permutation(Y_hat.shape[0])] # .detach()
+        neg_lag  = spa_adj @ Y_hat[np.random.permutation(Y_hat.shape[0])]
         if score_fun == "bernoulli":
             pos_score = torch.sigmoid(torch.sum(Y_lag * pred_lag, dim=1))
             neg_score = torch.sigmoid(torch.sum(Y_lag * neg_lag, dim=1))
@@ -285,42 +281,30 @@ class TransDeconv(nn.Module):
                  n_feats: int,
                  tau: float=0.5,
                  spa_autocorr: SpaAutoCorr=None,
-                 anchor_weight: float=0.0,
-                 scaler_g_init: Tensor=None,
-                 scaler_s_init: Tensor=None,
                  device:    torch.device=None,
                  seed:       int=None
                 ):
         """
         Args:
-            dim_tgt_outputs (int): Dimension of ground truth gene profile
-            dim_ref_inputs (int): Dimension of reference gene signature
-            n_feats (int): number of genes
-            spa_autocorr (SpaAutoCorr, optional): Instance of Spatial index class. Default to None.
-            anchor_weight (float): KL-divergence penalty weight anchoring W to W_anchor.
-            scaler_g_init (Tensor, optional): Fixed per-gene platform-effect log-scaler.
-            scaler_s_init (Tensor, optional): Fixed per-spot library-size log-scaler.
-            device (torch.device, optional): Device of computation. Defaults to None.
-            seed (int, optional): Seed number. Defaults to None.
+            dim_tgt_outputs (int): Number of spatial spots.
+            dim_ref_inputs (int): Number of reference cell types.
+            n_feats (int): Number of genes.
+            tau (float, optional): Softmax temperature; None for squared-param mode.
+            spa_autocorr (SpaAutoCorr, optional): Spatial autocorrelation regularizer.
+            device (torch.device, optional): Device of computation.
+            seed (int, optional): Random seed.
         """
         super().__init__()
         self.device = device
         self.seed = seed
-        self.anchor_weight = anchor_weight
         if not seed is None:
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
 
-        if scaler_g_init is not None:
-            self.register_buffer('scaler_g', scaler_g_init)
-        else:
-            self.scaler_g = nn.Parameter(torch.zeros(1, n_feats))
+        self.scaler_g = nn.Parameter(torch.zeros(1, n_feats))
         self.bias_g = nn.Parameter(torch.zeros(1, n_feats))
-        if scaler_s_init is not None:
-            self.register_buffer('scaler_s', scaler_s_init)
-        else:
-            self.scaler_s = nn.Parameter(torch.zeros(dim_tgt_outputs, 1))
+        self.scaler_s = nn.Parameter(torch.zeros(dim_tgt_outputs, 1))
         self.cos_by_col = nn.CosineSimilarity(dim=1)
         self.cos_by_row = nn.CosineSimilarity(dim=0)
         self.mse = nn.MSELoss(reduction='mean')
@@ -360,13 +344,10 @@ class TransDeconv(nn.Module):
              wt_l2_G: float=2.0,
              wt_l2_S: float=2.0,
              wt_l1:   float=5.0,
-             wt_abd:  float=2.0,
+             wt_abd:  float=0.5,
              wt_spa:  float=1.0,
              method_autocorr: str=CANO_NAME_MORANSI,
-             epoch_frac: float=1.0,
-             wt_mse: float=0.0,
-             huber: bool=True,
-             wt_js: float=0.0):
+             wt_js: float=2.0):
         """Calculate translation loss given ground truths
 
         Args:
@@ -374,12 +355,13 @@ class TransDeconv(nn.Module):
             Y (Tensor): Ground truth gene profile matrix [Spot, gene]
             cls_abd_sig (Tensor): Class abundance signature.
             truth_autocorr (Tensor): Ground-Truth spatal autocorrelation indices. Defaults to None.
-            wt_l2_G (float): Weight of l2 regularization. Defaults to 2.0.
-            wt_l2_S (float): Weight of l2 regularization. Defaults to 2.0.
-            wt_l1 (float): weight of l1 regulariztion. Defaults to 5.0.
-            wt_abd (float): weight of abundance signature loss. Defaults to 2.0.
-            wt_spa (float): weight spatial regularization loss. Defaults to 1.0.
-            method_autocorr (str): name of spatial autocorrelation methods "moranI" or "gearyC"
+            wt_l2_G (float): Weight of l2 regularization on gene scalers. Defaults to 2.0.
+            wt_l2_S (float): Weight of l2 regularization on spot scalers. Defaults to 2.0.
+            wt_l1 (float): Weight of l1 regulariztion on translation matrix. Defaults to 5.0.
+            wt_abd (float): Weight of abundance signature loss. Defaults to 0.5.
+            wt_spa (float): Weight of spatial regularization loss. Defaults to 1.0.
+            method_autocorr (str): Spatial autocorrelation method, "moranI" or "gearyC".
+            wt_js (float): Weight of Jensen-Shannon divergence loss. Defaults to 2.0.
 
         Returns:
             Tensor: scalar loss
@@ -413,13 +395,6 @@ class TransDeconv(nn.Module):
         loss = imp_loss +  wt_l2_G * l2normG + wt_l2_S * l2normS + \
                 wt_l1 * l1norm + wt_abd * abd_norm + wt_spa * spa_reg
 
-        if wt_mse > 0:
-            if huber:
-                mse_term = F.smooth_l1_loss(Y_hat[sel_valid], Y[sel_valid])
-            else:
-                mse_term = F.mse_loss(Y_hat[sel_valid], Y[sel_valid])
-            loss = loss + wt_mse * mse_term
-
         if wt_js > 0:
             Y_hat_prop = Y_hat[sel_valid] / (Y_hat[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
             Y_prop = Y[sel_valid] / (Y[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
@@ -429,15 +404,6 @@ class TransDeconv(nn.Module):
             js_term = 0.5 * (F.kl_div(M.log(), Y_hat_prop, reduction='batchmean') +
                              F.kl_div(M.log(), Y_prop, reduction='batchmean'))
             loss = loss + wt_js * js_term
-
-        if self.anchor_weight > 0 and hasattr(self, 'W_anchor'):
-            W_raw = self.trans._get_weight_mtx()
-            W_current = W_raw / (W_raw.sum(dim=0, keepdim=True) + 1e-10)
-            W_target = self.W_anchor / (self.W_anchor.sum(dim=0, keepdim=True) + 1e-10)
-            anchor_loss = F.kl_div(
-                (W_current + 1e-10).log(), W_target + 1e-10,
-                reduction='batchmean')
-            loss = loss + self.anchor_weight * anchor_loss
 
         return loss
         
@@ -486,15 +452,10 @@ class RaTranslator(nn.Module):
             random.seed(seed)
             np.random.seed(seed)
 
-        # self.trans1 = nn.Parameter(torch.randn(dim_input, dim_hid))
-        # self.relu = nn.ReLU()
-        # self.trans2 = nn.Parameter(torch.randn(dim_hid, dim_output))
-        # self.scaler = nn.Parameter(torch.ones(1, dim_output))
         self.trans = nn.Parameter(torch.randn(dim_input, dim_output))
 
     def _get_weight_mtx(self):
         return torch.softmax(self.trans, dim=0)
-        # return torch.sigmoid(self.trans1) @ torch.sigmoid(self.trans2, dim=0)
 
     def sparse_reg(self):
         return 0
@@ -514,7 +475,6 @@ class RaTranslator(nn.Module):
             : Translation results [translation weight matrix [Spot, Cell] ] 
         """
         trans = input @ self._get_weight_mtx()
-        # trans = torch.square(self.scaler) * self.relu(self.relu(input @ self.trans1) @ self.trans2)
         if only_pred:
             return trans
         
@@ -593,7 +553,6 @@ class RaTranslatorLowRank(nn.Module):
             : Translation results [translation weight matrix [Spot, Cell] ] 
         """
         trans = self.transform(input)
-        # trans = torch.square(self.scaler) * self.relu(self.relu(input @ self.trans1) @ self.trans2)
         if only_pred:
             return trans
         

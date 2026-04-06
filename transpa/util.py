@@ -574,10 +574,9 @@ def map_clusters_to_celltypes(spa_markers, ref_markers_per_ct, ct_list):
 
 def train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa=1.0,
                    truth_autocorr=None, method_autocorr='moranI',
-                   epoch_frac=1.0,
-                   wt_l1=5.0, wt_abd=2.0, wt_l2_G=2.0, wt_l2_S=2.0,
-                   grad_clip=0.0,
-                   wt_mse=0.0, huber=True, wt_js=0.0):
+                   wt_l1=5.0, wt_abd=0.5, wt_l2_G=2.0, wt_l2_S=2.0,
+                   wt_js=2.0):
+    """Single gradient step for TransDeconv training."""
     model.train()
     optimizer.zero_grad()
     loss = model.loss(X, Y, cls_abd_sig, 
@@ -586,13 +585,9 @@ def train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa=1.0,
                       wt_l1=wt_l1, wt_abd=wt_abd,
                       wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
                       method_autocorr=method_autocorr,
-                      epoch_frac=epoch_frac,
-                      wt_mse=wt_mse, huber=huber,
                       wt_js=wt_js,
                       )
     loss.backward()
-    if grad_clip > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     info = f'loss: {loss.item():.6f}'
     return info
@@ -637,52 +632,54 @@ def fit_deconv(
             spa_adj: sparse.coo_array=None,
             gene_mask: pd.DataFrame=None,
             normalize_sig: bool=False,
-            raw_counts: bool=True,
+            raw_counts: bool=False,
             init_weights: np.ndarray=None,
-            anchor_weight: float=0.0,
             wt_l1: float=5.0,
-            wt_abd: float=2.0,
+            wt_abd: float=0.5,
             wt_l2_G: float=2.0,
             wt_l2_S: float=2.0,
-            sig_mask_weight: float=1.0,
-            rate_sig: bool=False,
-            platform_norm: bool=False,
-            cosine_lr: bool=False,
-            warmup_epochs: int=0,
-            grad_clip: float=0.0,
-            wt_mse: float=0.0,
-            huber: bool=True,
-            wt_js: float=0.0,
+            cosine_lr: bool=True,
+            wt_js: float=2.0,
             device: torch.device=None,
             seed: int=None):
+    """Fit a TransDeconv model and return the trained model with tensors.
+
+    This is the core training loop. For the high-level API, use ``expDeconv``.
+
+    Args:
+        df_ref: Reference gene expression DataFrame [cells x genes].
+        df_tgt: Target spatial expression DataFrame [spots x genes].
+        lr: Learning rate.
+        weight_decay: AdamW weight decay.
+        n_epochs: Number of training epochs.
+        classes: Cell-type label per reference cell.
+        ct_list: Unique cell-type names.
+        n_top_genes: Number of top variable genes to select.
+        wt_spa: Spatial regularization weight.
+        tau: Softmax temperature; None for squared-param mode.
+        autocorr_method: 'moranI' or 'gearyC'.
+        spa_adj: Sparse spatial adjacency matrix.
+        gene_mask: Boolean mask [n_types x n_genes].
+        normalize_sig: L2-normalize cell-type signatures.
+        raw_counts: Whether to normalize by total UMI in signature computation.
+        init_weights: Initial deconvolution weights [spots x cell_types].
+        wt_l1: L1 regularization weight on translation matrix.
+        wt_abd: Abundance signature loss weight.
+        wt_l2_G: L2 regularization weight on gene scalers.
+        wt_l2_S: L2 regularization weight on spot scalers.
+        cosine_lr: Use cosine annealing LR schedule.
+        wt_js: Jensen-Shannon divergence loss weight.
+        device: Torch device.
+        seed: Random seed.
+
+    Returns:
+        Tuple of (trained TransDeconv model, X tensor, Y tensor).
+    """
     indices = select_top_variable_genes(df_ref.values, n_top_genes)
     X = df_ref.values[:, indices]
     Y = df_tgt.values[:, indices]
 
-    g_cls_sig, cls_abd_sig = signature(classes, ct_list, X, raw_counts=rate_sig)
-
-    if gene_mask is not None and sig_mask_weight < 1.0:
-        gene_cols = df_ref.columns[indices]
-        shared = gene_mask.columns.intersection(gene_cols)
-        if len(shared) > 0:
-            gene_col_list = list(gene_cols)
-            col_map = {g: gene_col_list.index(g) for g in shared}
-            mask_sub = gene_mask.reindex(index=ct_list, columns=shared).values
-            soft_mask = np.ones_like(g_cls_sig)
-            for g, j in col_map.items():
-                soft_mask[:, j] = np.where(mask_sub[:, list(shared).index(g)],
-                                           1.0, sig_mask_weight)
-            g_cls_sig = g_cls_sig * soft_mask
-
-    if platform_norm:
-        g_cls_sig, log_platform_factor = platform_effect_normalize(
-            g_cls_sig, Y, cls_abd_sig)
-        scaler_g_init = tensify(log_platform_factor.reshape(1, -1), device)
-        lib_size = Y.sum(axis=1, keepdims=True).astype(np.float64)
-        scaler_s_init = tensify(np.log(lib_size + 1e-10), device)
-    else:
-        scaler_g_init = None
-        scaler_s_init = None
+    g_cls_sig, cls_abd_sig = signature(classes, ct_list, X, raw_counts=raw_counts)
 
     X, Y = tensify(g_cls_sig, device), tensify(Y, device)
     cls_abd_sig = tensify(cls_abd_sig, device)
@@ -698,9 +695,6 @@ def fit_deconv(
                  dim_ref_inputs=X.shape[0],
                  tau=tau,
                  spa_autocorr=None if spa_adj is None else SpaAutoCorr(spa_adj),
-                 anchor_weight=anchor_weight,
-                 scaler_g_init=scaler_g_init,
-                 scaler_s_init=scaler_s_init,
                  device=device,
                  seed=seed).to(device)
 
@@ -708,7 +702,6 @@ def fit_deconv(
         with torch.no_grad():
             W_init = torch.tensor(init_weights.T, dtype=torch.float32, device=device)
             model.trans.trans.copy_(torch.sqrt(W_init + 1e-10))
-            model.register_buffer('W_anchor', W_init)
 
     if spa_adj is not None:
         with torch.no_grad():
@@ -716,18 +709,8 @@ def fit_deconv(
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     if cosine_lr:
-        if warmup_epochs > 0:
-            warmup_sched = torch.optim.lr_scheduler.LinearLR(
-                optimizer, start_factor=0.01, end_factor=1.0,
-                total_iters=warmup_epochs)
-            cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=n_epochs - warmup_epochs)
-            scheduler = torch.optim.lr_scheduler.SequentialLR(
-                optimizer, schedulers=[warmup_sched, cosine_sched],
-                milestones=[warmup_epochs])
-        else:
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=n_epochs)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=n_epochs)
     else:
         scheduler = None
     pbar = tqdm(range(n_epochs), disable=not sys.stderr.isatty())
@@ -736,11 +719,8 @@ def fit_deconv(
         info  = train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa,
                                   None if spa_adj is None else truth_autocorr,
                                   autocorr_method,
-                                  epoch_frac=(ith_epoch + 1) / n_epochs,
                                   wt_l1=wt_l1, wt_abd=wt_abd,
                                   wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
-                                  grad_clip=grad_clip,
-                                  wt_mse=wt_mse, huber=huber,
                                   wt_js=wt_js,
                                   )
         if scheduler is not None:
@@ -774,30 +754,19 @@ def expDeconv(adata_ref: sc.AnnData=None,
               wt_abd: float=0.5,
               wt_l2_G: float=2.0,
               wt_l2_S: float=2.0,
+              wt_js: float=2.0,
               autocorr_method: str='moranI',
               spa_adj:sparse.coo_array=None,
               spa_adata: sc.AnnData=None,
               calibrate: float=0.0,
               gene_mask: pd.DataFrame=None,
-              normalize_sig: bool=True,
+              normalize_sig: bool=False,
               raw_counts: bool=None,
               smart_markers: bool=False,
               spatial_markers: bool=False,
               score_init: bool=True,
-              sig_score_init: bool=False,
               cluster_mapping: bool=True,
-              anchor_weight: float=0.0,
-              sig_mask_weight: float=1.0,
-              rate_sig: bool=False,
-              platform_norm: bool=False,
               cosine_lr: bool=True,
-              warmup_epochs: int=0,
-              grad_clip: float=0.0,
-              wt_mse: float=0.0,
-              huber: bool=True,
-              wt_js: float=2.0,
-              sharpen_temp: float=1.0,
-              topk_output: int=0,
               device: torch.device=None,
               seed: int=None,
               _cache_path: str=None):
@@ -828,6 +797,11 @@ def expDeconv(adata_ref: sc.AnnData=None,
         n_top_genes (int): Variable genes (ignored when topk is set).
         topk (int): Marker genes per cell type via DE test.
         wt_spa (float): Spatial regularization weight.
+        wt_l1 (float): L1 regularization weight on translation matrix.
+        wt_abd (float): Abundance signature loss weight.
+        wt_l2_G (float): L2 regularization weight on gene scalers.
+        wt_l2_S (float): L2 regularization weight on spot scalers.
+        wt_js (float): Jensen-Shannon divergence loss weight.
         autocorr_method (str): 'moranI' or 'gearyC'.
         spa_adj: Spatial adjacency matrix.
         spa_adata: Spatial AnnData for Leiden clustering.
@@ -835,11 +809,11 @@ def expDeconv(adata_ref: sc.AnnData=None,
         gene_mask: Boolean mask [n_types x n_genes].
         normalize_sig (bool): L2-normalize cell-type signatures.
         raw_counts (bool, optional): Auto-detected if None.
-        smart_markers (bool): Phase 1 -- abundance-aware marker selection.
-        spatial_markers (bool): Phase 2 -- augment with spatial-derived markers.
-        score_init (bool): Phase 3 -- sc.tl.score_genes warm-start.
-        cluster_mapping (bool): Phase 4 -- cluster-to-celltype mapping reg.
-        anchor_weight (float): Phase 5 -- KL anchor penalty weight.
+        smart_markers (bool): Abundance-aware marker selection.
+        spatial_markers (bool): Augment with spatial-derived markers.
+        score_init (bool): sc.tl.score_genes warm-start.
+        cluster_mapping (bool): Cluster-to-celltype mapping regularization.
+        cosine_lr (bool): Use cosine annealing learning rate schedule.
         device: Torch device.
         seed: Random seed.
 
@@ -949,27 +923,6 @@ def expDeconv(adata_ref: sc.AnnData=None,
             aug_w = np.full((n_aug, len(ct_list)), 1.0 / len(ct_list))
             init_weights = np.vstack([init_weights, aug_w])
 
-    if sig_score_init and spa_adata is not None:
-        sig_scores = compute_signature_scores(
-            spa_adata, df_ref, classes, ct_list, topk_sig=topk or 50)
-        sig_weights = np.clip(sig_scores, 0, None)
-        row_sums = sig_weights.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1.0
-        sig_weights = sig_weights / row_sums
-        if init_weights is not None:
-            base = init_weights[:spa_adata.n_obs]
-            init_weights[:spa_adata.n_obs] = 0.5 * base + 0.5 * sig_weights
-            row_sums = init_weights.sum(axis=1, keepdims=True)
-            row_sums[row_sums == 0] = 1.0
-            init_weights = init_weights / row_sums
-        else:
-            init_weights = sig_weights
-            n_total_tgt = len(df_tgt)
-            if init_weights.shape[0] < n_total_tgt:
-                n_aug = n_total_tgt - init_weights.shape[0]
-                aug_w = np.full((n_aug, len(ct_list)), 1.0 / len(ct_list))
-                init_weights = np.vstack([init_weights, aug_w])
-
     if cluster_mapping and spa_markers_dict is not None and spa_cluster_labels is not None:
         assoc_matrix, cids = map_clusters_to_celltypes(
             spa_markers_dict, markers_per_ct, ct_list)
@@ -1038,34 +991,17 @@ def expDeconv(adata_ref: sc.AnnData=None,
                             autocorr_method=autocorr_method,
                             spa_adj=spa_adj,
                             gene_mask=gene_mask,
+                            normalize_sig=normalize_sig,
                             init_weights=init_weights,
-                            anchor_weight=anchor_weight,
                             wt_l1=wt_l1, wt_abd=wt_abd,
                             wt_l2_G=wt_l2_G, wt_l2_S=wt_l2_S,
-                            sig_mask_weight=sig_mask_weight,
-                            rate_sig=rate_sig,
-                            platform_norm=platform_norm,
                             cosine_lr=cosine_lr,
-                            warmup_epochs=warmup_epochs,
-                            grad_clip=grad_clip,
-                            wt_mse=wt_mse,
-                            huber=huber,
                             wt_js=wt_js,
                             device=device,
                             seed=seed) 
     with torch.no_grad():
         model.eval()
         preds, weights = model.predict(X, return_cluster=True)
-
-    if sharpen_temp != 1.0 and sharpen_temp > 0:
-        weights = np.power(weights + 1e-30, 1.0 / sharpen_temp)
-        weights = weights / (weights.sum(axis=1, keepdims=True) + 1e-30)
-
-    if topk_output > 0 and topk_output < weights.shape[1]:
-        topk_idx = np.argsort(weights, axis=1)[:, :-topk_output]
-        for i in range(weights.shape[0]):
-            weights[i, topk_idx[i]] = 0.0
-        weights = weights / (weights.sum(axis=1, keepdims=True) + 1e-30)
 
     if calibrate:
         alpha = float(calibrate) if not isinstance(calibrate, bool) else (1.0 if calibrate else 0.0)
@@ -1883,8 +1819,9 @@ def run_velocity(adata, vkey='stc_velocity', mode=None, n_pcs=30,
     """
     import scvelo as scv
 
+    scv.pp.remove_duplicate_cells(adata)
     sc.tl.pca(adata, n_comps=n_pcs)
-    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs)
+    scv.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs)
     sc.tl.umap(adata)
     sc.tl.leiden(adata)
 
