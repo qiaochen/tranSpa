@@ -35,13 +35,13 @@ Three demo notebooks are also available under the [demo](https://github.com/qiao
 TransImp is available through PyPI. To install, type the following command line and add -U for updates:
 
 ```
-pip install -U transpa
+pip install -U transpa (not yet updated to pypi, so please install from the repo)
 ```
 
-Or, download the project and under project root `tranSpa/`
+Or, install from the repo:
 
 ```
-pip install .
+pip install -U git+https://github.com/qiaochen/tranSpa
 ```
 
 ## Data
