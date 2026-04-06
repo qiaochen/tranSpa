@@ -279,7 +279,7 @@ class TransDeconv(nn.Module):
                  dim_tgt_outputs: int,
                  dim_ref_inputs:  int,
                  n_feats: int,
-                 tau: float=0.5,
+                 tau: float=None,
                  spa_autocorr: SpaAutoCorr=None,
                  device:    torch.device=None,
                  seed:       int=None

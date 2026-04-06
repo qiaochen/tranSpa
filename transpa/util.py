@@ -714,6 +714,7 @@ def fit_deconv(
     else:
         scheduler = None
     pbar = tqdm(range(n_epochs), disable=not sys.stderr.isatty())
+    _log_interval = max(1, n_epochs // 8)
 
     for ith_epoch in pbar:
         info  = train_deconv_step(optimizer, model, X, Y, cls_abd_sig, wt_spa,
@@ -726,6 +727,8 @@ def fit_deconv(
         if scheduler is not None:
             scheduler.step()
         pbar.set_description(f"[LinTrans] Epoch: {ith_epoch+1}/{n_epochs}, {info}")
+        if not sys.stderr.isatty() and (ith_epoch + 1) % _log_interval == 0:
+            print(f"  [fit_deconv] Epoch {ith_epoch+1}/{n_epochs}, {info}")
 
     return model, X, Y
 
@@ -832,9 +835,12 @@ def expDeconv(adata_ref: sc.AnnData=None,
             ct_list = np.unique(classes)
         if spa_adata is None:
             spa_adata = adata_tgt
+        print(f"[expDeconv] {df_ref.shape[0]} ref cells, {df_tgt.shape[0]} tgt spots, "
+              f"{len(ct_list)} cell types, {df_ref.shape[1]} shared genes")
 
     if raw_counts is None:
         raw_counts = is_count_data(df_ref.values if df_ref is not None else df_tgt.values)
+    print(f"[expDeconv] Auto-detected raw counts: {raw_counts}")
 
     markers_per_ct = {}
 
@@ -854,12 +860,16 @@ def expDeconv(adata_ref: sc.AnnData=None,
         for ct in ct_list:
             markers_per_ct[ct] = list(
                 _topk_mask.columns[_topk_mask.loc[ct].values])
+        print(f"[expDeconv] Selected {df_ref.shape[1]} marker genes "
+              f"(topk={topk}, {len(ct_list)} cell types)")
 
     spa_cluster_labels = None
     spa_markers_dict = None
     if spa_adata is not None:
         cluster_labels, _ = leiden_cluster(spa_adata, normalize=True)
         spa_cluster_labels = cluster_labels
+        n_clusters = len(cluster_labels.unique())
+        print(f"[expDeconv] Leiden clustering: {n_clusters} clusters")
 
         if spatial_markers:
             spa_markers_dict, spa_cluster_labels = select_spatial_markers(
@@ -907,6 +917,8 @@ def expDeconv(adata_ref: sc.AnnData=None,
             n_original_spots = len(df_tgt) - len(cluster_means)
         else:
             n_original_spots = len(df_tgt)
+        print(f"[expDeconv] Augmented target with cluster means -> "
+              f"{len(df_tgt)} total rows ({n_original_spots} original spots)")
     else:
         n_original_spots = None
 
@@ -922,6 +934,8 @@ def expDeconv(adata_ref: sc.AnnData=None,
             n_aug = n_total_tgt - init_weights.shape[0]
             aug_w = np.full((n_aug, len(ct_list)), 1.0 / len(ct_list))
             init_weights = np.vstack([init_weights, aug_w])
+        print(f"[expDeconv] Score-init weights computed "
+              f"({init_weights.shape[0]} spots x {init_weights.shape[1]} cell types)")
 
     if cluster_mapping and spa_markers_dict is not None and spa_cluster_labels is not None:
         assoc_matrix, cids = map_clusters_to_celltypes(
@@ -952,6 +966,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
                         (n_total_tgt - init_weights.shape[0], len(ct_list)),
                         1.0 / len(ct_list))
                     init_weights = np.vstack([init_weights, aug_w])
+        print(f"[expDeconv] Cluster-to-celltype mapping done (85/15 blend)")
 
     if n_top_genes is not None and n_top_genes > 0:
         n_top_genes = min(n_top_genes, min(df_ref.shape[1], df_tgt.shape[1]))
@@ -980,6 +995,8 @@ def expDeconv(adata_ref: sc.AnnData=None,
             init_weights = _cache_data['init_weights']
             n_original_spots = _cache_data['n_original_spots']
 
+    print(f"[expDeconv] Starting fit_deconv (n_epochs={n_epochs}, lr={lr}, "
+          f"wd={weight_decay}, wt_js={wt_js})")
     model, X, Y = fit_deconv(
                             df_ref, df_tgt,
                             lr, weight_decay, n_epochs,
@@ -999,9 +1016,11 @@ def expDeconv(adata_ref: sc.AnnData=None,
                             wt_js=wt_js,
                             device=device,
                             seed=seed) 
+    print(f"[expDeconv] Training complete")
     with torch.no_grad():
         model.eval()
         preds, weights = model.predict(X, return_cluster=True)
+    print(f"[expDeconv] Prediction done: {preds.shape[0]} spots x {preds.shape[1]} cell types")
 
     if calibrate:
         alpha = float(calibrate) if not isinstance(calibrate, bool) else (1.0 if calibrate else 0.0)
@@ -1728,7 +1747,8 @@ def expVeloImp(adata_ref: sc.AnnData=None,
     return _S, _U, _V, _X
 
 
-def build_adata(S, U, X, spa_adata, ref_adata, celltype_label='Class'):
+def build_adata(S, U, X, spa_adata, ref_adata, 
+                celltype_label='Class', n_comps=30, n_neighbors=30):
     """Build an AnnData from ``expVeloImp`` output with proper S/U handling.
 
     Creates the AnnData, stores spliced/unspliced layers, records
@@ -1760,6 +1780,13 @@ def build_adata(S, U, X, spa_adata, ref_adata, celltype_label='Class'):
     """
     import scvelo as scv
 
+    spa_adata = spa_adata.copy()
+    scv.pp.remove_duplicate_cells(spa_adata)
+    sc.tl.pca(spa_adata, n_comps=n_comps)
+    scv.pp.neighbors(spa_adata, n_neighbors=n_neighbors, n_pcs=n_comps)
+    sc.tl.umap(spa_adata)
+    sc.tl.leiden(spa_adata)
+    
     adata = sc.AnnData(X)
     adata.obs = spa_adata.obs.copy()
     adata.obs_names = spa_adata.obs_names
@@ -1768,6 +1795,7 @@ def build_adata(S, U, X, spa_adata, ref_adata, celltype_label='Class'):
     for key in spa_adata.obsm:
         adata.obsm[key] = spa_adata.obsm[key].copy()
 
+    adata.obsp = spa_adata.obsp.copy()
     adata.uns = spa_adata.uns.copy()
     if f'{celltype_label}_colors' in ref_adata.uns:
         adata.uns[f'{celltype_label}_colors'] = ref_adata.uns[f'{celltype_label}_colors']
@@ -1818,13 +1846,9 @@ def run_velocity(adata, vkey='stc_velocity', mode=None, n_pcs=30,
         The same object, modified in-place and returned for convenience.
     """
     import scvelo as scv
-
-    scv.pp.remove_duplicate_cells(adata)
-    sc.tl.pca(adata, n_comps=n_pcs)
-    scv.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs)
+    if 'neighbors' not in adata.uns:
+        scv.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs)
     sc.tl.umap(adata)
-    sc.tl.leiden(adata)
-
     scv.pp.moments(adata, n_pcs=n_pcs, n_neighbors=n_neighbors)
     velo_kwargs = dict(vkey=vkey)
     if mode is not None:
