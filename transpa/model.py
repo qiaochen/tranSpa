@@ -366,7 +366,8 @@ class TransDeconv(nn.Module):
         Returns:
             Tensor: scalar loss
         """
-        Y_hat = torch.exp(self.scaler_g) * self.trans(X.t()).t() * torch.exp(self.scaler_s)
+        W_raw = self.trans._get_weight_mtx()
+        Y_hat = torch.exp(self.scaler_g) * (X.t() @ W_raw).t() * torch.exp(self.scaler_s)
         
         norm_Y_hat = torch.norm(Y_hat, dim=1)
         sel_valid = (norm_Y_hat != 0) & ~torch.isnan(norm_Y_hat) &  ~torch.isinf(norm_Y_hat)
@@ -380,8 +381,7 @@ class TransDeconv(nn.Module):
         abd_sig_hat = torch.sum(self.trans.trans ** 2, dim=1, keepdim=True)
         abd_sig =  cls_abd_sig
         
-        W = torch.square(self.trans.trans.t()) if self.trans.tau is None else self.trans._get_weight_mtx()
-        l1norm = torch.norm(W, p=1, dim=1).mean()
+        l1norm = torch.norm(W_raw.t() if self.trans.tau is None else W_raw, p=1, dim=1).mean()
         l2normG = torch.norm(torch.exp(self.scaler_g), p=2)
         l2normS = torch.norm(torch.exp(self.scaler_s), p=2)
         abd_norm = (1 - self.cos_by_row(torch.log2(abd_sig_hat + 1)/ np.log2(2), 
@@ -824,6 +824,7 @@ class TransImp(nn.Module):
              wt_spa:  float=1e-1,
              gene_weights=1,
              truth_spa_stats: Tensor=None,
+             wt_js: float=0.0,
              ):
         """Calculate translation loss given ground truths
 
@@ -834,6 +835,7 @@ class TransImp(nn.Module):
             wt_l2norm (float): l2 normalization for translation function. Default to 1e-2.
             wt_spa (float): weight for spatial regularization loss. Default to 1e-1.
             truth_spa_stats (Tensor): Ground-Truth spatial statistics. Defaults to None.
+            wt_js (float): weight for Jensen-Shannon divergence loss. Default to 0.0.
 
         Returns:
             Tensor: scalar loss
@@ -857,7 +859,17 @@ class TransImp(nn.Module):
         if not self.spa_inst is None and wt_spa > 0:
             spa_reg = self.spa_inst.loss(Y_hat)
             loss = loss + wt_spa * spa_reg           
-        
+
+        if wt_js > 0:
+            Y_hat_prop = Y_hat[sel_valid] / (Y_hat[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
+            Y_prop = Y[sel_valid] / (Y[sel_valid].sum(dim=1, keepdim=True) + 1e-10)
+            Y_hat_prop = Y_hat_prop.clamp(min=1e-10)
+            Y_prop = Y_prop.clamp(min=1e-10)
+            M = 0.5 * (Y_hat_prop + Y_prop)
+            js_term = 0.5 * (F.kl_div(M.log(), Y_hat_prop, reduction='batchmean') +
+                             F.kl_div(M.log(), Y_prop, reduction='batchmean'))
+            loss = loss + wt_js * js_term
+
         return loss, imp_loss.item(), spa_reg.item() if not self.spa_inst is None and wt_spa > 0 else 0
 
     def loss_batch(self,
