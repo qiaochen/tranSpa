@@ -26,7 +26,8 @@ def is_count_data(X, n_check=1000):
     range.  Returns ``True`` when the data looks like raw UMI counts and
     ``False`` when it appears to be normalised / log-transformed.
     """
-    sample = X[:n_check] if len(X) > n_check else X
+    n_rows = X.shape[0] if hasattr(X, 'shape') else len(X)
+    sample = X[:n_check] if n_rows > n_check else X
     if sparse.issparse(sample):
         sample = sample.toarray()
     sample = np.asarray(sample)
@@ -39,7 +40,8 @@ def is_count_data(X, n_check=1000):
 
 def is_lognorm_data(X, n_check=500):
     """Return True if X appears to be log-normalized (no integers, max < 20)."""
-    sample = X[:n_check] if len(X) > n_check else X
+    n_rows = X.shape[0] if hasattr(X, 'shape') else len(X)
+    sample = X[:n_check] if n_rows > n_check else X
     if sparse.issparse(sample):
         sample = sample.toarray()
     vals = np.asarray(sample)[np.asarray(sample) > 0].ravel()
@@ -192,11 +194,14 @@ def signature(classes: np.array,
     cls_abd_sig = np.asarray(indicator.sum(axis=1))  # [n_cls, 1]
 
     if raw_counts:
-        numi = expr_mtx.sum(axis=1, keepdims=True) + 1e-10
-        rate_mtx = expr_mtx / numi
-        g_cls_sig = np.asarray(indicator.dot(rate_mtx), dtype=expr_mtx.dtype) / np.maximum(cls_abd_sig, 1)
+        numi = np.asarray(expr_mtx.sum(axis=1)).reshape(-1, 1) + 1e-10
+        if sparse.issparse(expr_mtx):
+            rate_mtx = expr_mtx.multiply(1.0 / numi)
+        else:
+            rate_mtx = expr_mtx / numi
+        g_cls_sig = np.asarray(indicator.dot(rate_mtx), dtype=np.float32) / np.maximum(cls_abd_sig, 1)
     else:
-        g_cls_sig = np.asarray(indicator.dot(expr_mtx), dtype=expr_mtx.dtype)
+        g_cls_sig = np.asarray(indicator.dot(expr_mtx), dtype=np.float32)
     return g_cls_sig, cls_abd_sig
 
 
@@ -233,9 +238,9 @@ def _fast_rank_genes(X, labels, group_names, topk=30):
     Returns dict mapping group_name -> list of top-k gene column indices.
     """
     from scipy import sparse as _sp
-    if _sp.issparse(X):
-        X = X.toarray()
-    X = np.asarray(X, dtype=_DEFAULT_DTYPE)
+    _is_sparse = _sp.issparse(X)
+    if not _is_sparse:
+        X = np.asarray(X, dtype=_DEFAULT_DTYPE)
     n_cells, n_genes = X.shape
 
     unique_labels = np.unique(labels)
@@ -250,7 +255,7 @@ def _fast_rank_genes(X, labels, group_names, topk=30):
     group_n = np.asarray(indicator.sum(axis=1)).ravel()
     group_sum = np.asarray(indicator.dot(X))
 
-    X_sq = X ** 2
+    X_sq = X.power(2) if _is_sparse else X ** 2
     group_sq_sum = np.asarray(indicator.dot(X_sq))
     total_sum = group_sum.sum(axis=0)
     total_sq_sum = group_sq_sum.sum(axis=0)
@@ -319,8 +324,13 @@ def select_deconv_genes(df_ref: pd.DataFrame,
     import anndata
 
     shared_genes = np.intersect1d(df_ref.columns, df_tgt.columns)
+    ref_sub = df_ref[shared_genes]
+    if hasattr(ref_sub, '_X'):
+        X_for_adata = ref_sub._X.copy().astype(_DEFAULT_DTYPE)
+    else:
+        X_for_adata = ref_sub.values.copy().astype(_DEFAULT_DTYPE)
     adata = anndata.AnnData(
-        X=df_ref[shared_genes].values.copy().astype(_DEFAULT_DTYPE),
+        X=X_for_adata,
         obs=pd.DataFrame({'celltype': classes}),
         var=pd.DataFrame(index=shared_genes),
     )
@@ -446,8 +456,13 @@ def select_deconv_genes_v2(df_ref, df_tgt, classes, ct_list, topk=30,
     ct_list = np.asarray(ct_list)
     shared_genes = np.intersect1d(df_ref.columns, df_tgt.columns)
 
+    ref_sub = df_ref[shared_genes]
+    if hasattr(ref_sub, '_X'):
+        X_for_adata = ref_sub._X.copy().astype(_DEFAULT_DTYPE)
+    else:
+        X_for_adata = ref_sub.values.copy().astype(_DEFAULT_DTYPE)
     adata = anndata.AnnData(
-        X=df_ref[shared_genes].values.copy().astype(_DEFAULT_DTYPE),
+        X=X_for_adata,
         obs=pd.DataFrame({'celltype': classes}),
         var=pd.DataFrame(index=shared_genes),
     )
@@ -687,10 +702,12 @@ def fit_deconv(
     Returns:
         Tuple of (trained TransDeconv model, X tensor, Y tensor).
     """
-    indices = select_top_variable_genes(df_ref.values, n_top_genes)
-    X = df_ref.values[:, indices]
-    Y = df_tgt.values[:, indices]
-    del df_ref, df_tgt
+    ref_mat = df_ref._X if hasattr(df_ref, '_X') else df_ref.values
+    tgt_mat = df_tgt._X if hasattr(df_tgt, '_X') else df_tgt.values
+    indices = select_top_variable_genes(ref_mat, n_top_genes)
+    X = np.asarray(ref_mat[:, indices].todense() if sparse.issparse(ref_mat) else ref_mat[:, indices])
+    Y = np.asarray(tgt_mat[:, indices].todense() if sparse.issparse(tgt_mat) else tgt_mat[:, indices])
+    del df_ref, df_tgt, ref_mat, tgt_mat
 
     g_cls_sig, cls_abd_sig = signature(classes, ct_list, X, raw_counts=raw_counts)
 
@@ -745,11 +762,52 @@ def fit_deconv(
 
     return model, X, Y
 
+class SparseFrame:
+    """Thin wrapper: scipy sparse matrix + column/row names.
+
+    Stays sparse until ``.values`` is accessed, deferring the expensive
+    dense materialisation to the point where it is actually needed
+    (typically after gene selection has already reduced the column count).
+    """
+    __slots__ = ('_X', '_columns', '_index', '_col_idx')
+
+    def __init__(self, X, index, columns):
+        from scipy import sparse as _sp
+        self._X = X.tocsc() if _sp.issparse(X) else _sp.csc_matrix(X)
+        self._columns = np.asarray(columns)
+        self._index = index
+        self._col_idx = {c: i for i, c in enumerate(self._columns)}
+
+    @property
+    def shape(self):
+        return self._X.shape
+
+    @property
+    def columns(self):
+        return self._columns
+
+    @property
+    def index(self):
+        return self._index
+
+    @property
+    def values(self):
+        return np.asarray(self._X.todense(), dtype=_DEFAULT_DTYPE)
+
+    def __len__(self):
+        return self._X.shape[0]
+
+    def __getitem__(self, cols):
+        idx = np.array([self._col_idx[c] for c in cols])
+        return SparseFrame(self._X[:, idx], self._index, np.asarray(cols))
+
+
 def _adata_to_df(adata):
-    """Convert AnnData.X to a pd.DataFrame, handling sparse matrices."""
+    """Convert AnnData.X to a SparseFrame (sparse) or pd.DataFrame (dense)."""
     X = adata.X
     if sparse.issparse(X):
-        X = X.toarray()
+        return SparseFrame(X.astype(_DEFAULT_DTYPE),
+                           adata.obs_names, adata.var_names)
     return pd.DataFrame(np.asarray(X, dtype=_DEFAULT_DTYPE),
                         index=adata.obs_names, columns=adata.var_names)
 
@@ -859,7 +917,9 @@ def expDeconv(adata_ref: sc.AnnData=None,
               f"{len(ct_list)} cell types, {df_ref.shape[1]} shared genes")
 
     if raw_counts is None:
-        raw_counts = is_count_data(df_ref.values if df_ref is not None else df_tgt.values)
+        _probe = df_ref if df_ref is not None else df_tgt
+        raw_counts = is_count_data(
+            _probe._X if hasattr(_probe, '_X') else _probe.values)
     if normalized and raw_counts:
         raw_counts = False
     print(f"[expDeconv] Auto-detected raw counts: {raw_counts}")
@@ -936,14 +996,15 @@ def expDeconv(adata_ref: sc.AnnData=None,
         tgt_names = df_tgt.index if hasattr(df_tgt.index, 'tolist') else np.arange(len(df_tgt))
         cluster_map = pd.Series(spa_clusters, index=spot_names).reindex(tgt_names)
         cluster_means = []
+        tgt_vals = df_tgt.values
         for cid in cluster_ids:
             mask = (cluster_map.values == cid)
             if mask.sum() > 0:
-                cluster_means.append(df_tgt.values[mask].mean(axis=0))
+                cluster_means.append(tgt_vals[mask].mean(axis=0))
         if cluster_means:
             cluster_means = np.vstack(cluster_means)
             df_tgt_aug = pd.DataFrame(
-                np.vstack([df_tgt.values, cluster_means]),
+                np.vstack([tgt_vals, cluster_means]),
                 columns=df_tgt.columns,
             )
             df_tgt = df_tgt_aug
@@ -1130,15 +1191,14 @@ def fit_transImp(
             device: torch.device=None,
             seed: int=None):
         
-    X = df_ref[train_gene].values
-    Y = df_tgt[train_gene].values
-    Y = tensify(Y, device)
+    Y = tensify(df_tgt[train_gene].values, device)
     if signature_mode == 'cluster':
-        g_cls_sig, _ = signature(classes, ct_list, X)
-    
+        raw_X = df_ref[train_gene]
+        g_cls_sig, _ = signature(classes, ct_list,
+                                 raw_X.values if not hasattr(raw_X, '_X') else raw_X._X)
         X = tensify(g_cls_sig, device)
     else:
-        X = tensify(X, device)
+        X = tensify(df_ref[train_gene].values, device)
         
     spa_inst = None
     if locations is not None:
@@ -1169,12 +1229,15 @@ def fit_transImp(
         pbar.set_description(f"[TransImp] Epoch: {ith_epoch+1}/{n_epochs}, {info}") 
 
     if signature_mode == 'cluster':
-        test_X, _ = signature(classes, ct_list, df_ref[test_gene].values)
+        raw_test = df_ref[test_gene]
+        test_X, _ = signature(classes, ct_list,
+                              raw_test.values if not hasattr(raw_test, '_X') else raw_test._X)
         test_X = tensify(test_X, device)
     else:
         test_X = tensify(df_ref[test_gene].values, device)
 
     return model, X, Y, test_X
+
 
 def fit_transImp_batched(
             df_ref: pd.DataFrame, 
@@ -1208,14 +1271,14 @@ def fit_transImp_batched(
     """
     from torch.utils.data import DataLoader, TensorDataset
 
-    X = df_ref[train_gene].values
-    Y = df_tgt[train_gene].values
-    Y = tensify(Y, device)
+    Y = tensify(df_tgt[train_gene].values, device)
     if signature_mode == 'cluster':
-        g_cls_sig, _ = signature(classes, ct_list, X)
+        raw_X = df_ref[train_gene]
+        g_cls_sig, _ = signature(classes, ct_list,
+                                 raw_X.values if not hasattr(raw_X, '_X') else raw_X._X)
         X = tensify(g_cls_sig, device)
     else:
-        X = tensify(X, device)
+        X = tensify(df_ref[train_gene].values, device)
         
     spa_inst = None
     if locations is not None:
@@ -1265,7 +1328,9 @@ def fit_transImp_batched(
         pbar.set_description(f"[TransImp-Batch] Epoch: {ith_epoch+1}/{n_epochs}, {info}") 
 
     if signature_mode == 'cluster':
-        test_X, _ = signature(classes, ct_list, df_ref[test_gene].values)
+        raw_test = df_ref[test_gene]
+        test_X, _ = signature(classes, ct_list,
+                              raw_test.values if not hasattr(raw_test, '_X') else raw_test._X)
         test_X = tensify(test_X, device)
     else:
         test_X = tensify(df_ref[test_gene].values, device)
@@ -1677,14 +1742,16 @@ def expVeloImp(adata_ref: sc.AnnData=None,
     if adata_raw is not None:
         S_full = adata_raw.layers['spliced']
         U_full = adata_raw.layers['unspliced']
-        if sp.issparse(S_full):
-            S_full = S_full.toarray()
-        if sp.issparse(U_full):
-            U_full = U_full.toarray()
         orig_var = adata_raw.var_names
         gene_idx = np.array([orig_var.get_loc(g) for g in test_gene])
-        S = S_full[:, gene_idx]
-        U = U_full[:, gene_idx]
+        S_slice = S_full[:, gene_idx]
+        U_slice = U_full[:, gene_idx]
+        if sp.issparse(S_slice):
+            S_slice = S_slice.toarray()
+        if sp.issparse(U_slice):
+            U_slice = U_slice.toarray()
+        S = S_slice
+        U = U_slice
         S_raw = S
         U_raw = U
 
