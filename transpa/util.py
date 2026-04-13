@@ -1117,7 +1117,7 @@ def expDeconv(adata_ref: sc.AnnData=None,
     with torch.no_grad():
         model.eval()
         preds, weights = model.predict(X, return_cluster=True)
-    print(f"[expDeconv] Prediction done: {preds.shape[0]} spots x {preds.shape[1]} cell types")
+    print(f"[expDeconv] Prediction done: {preds.shape[0]} spots x {preds.shape[1]} marker genes")
 
     if calibrate:
         alpha = float(calibrate) if not isinstance(calibrate, bool) else (1.0 if calibrate else 0.0)
